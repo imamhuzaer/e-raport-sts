@@ -326,10 +326,45 @@ export async function readSpreadsheetFileToRows(file: File): Promise<string[][]>
   const wb = XLSX.read(buffer, { type: 'array' });
   const firstSheetName = wb.SheetNames[0];
   const ws = wb.Sheets[firstSheetName];
-  const rawRows = XLSX.utils.sheet_to_json<any[]>(ws, { header: 1, defval: '' });
-  return rawRows
-    .map((r) => (Array.isArray(r) ? r.map((cell) => String(cell ?? '').trim()) : []))
-    .filter((r) => r.some((cell) => cell !== ''));
+  const rawRows = XLSX.utils.sheet_to_json<any[]>(ws, {
+    header: 1,
+    defval: '',
+    raw: true,
+  });
+  const fmtRows = XLSX.utils.sheet_to_json<any[]>(ws, {
+    header: 1,
+    defval: '',
+    raw: false,
+  });
+  const rowCount = Math.max(rawRows.length, fmtRows.length);
+  const out: string[][] = [];
+  for (let r = 0; r < rowCount; r++) {
+    const rawRow = Array.isArray(rawRows[r]) ? rawRows[r] : [];
+    const fmtRow = Array.isArray(fmtRows[r]) ? fmtRows[r] : [];
+    const colCount = Math.max(rawRow.length, fmtRow.length);
+    const rowCells: string[] = [];
+    for (let c = 0; c < colCount; c++) {
+      const rawCell = rawRow[c];
+      const fmtCell = String(fmtRow[c] ?? '').trim();
+      if (
+        typeof rawCell === 'number' &&
+        Number.isFinite(rawCell) &&
+        (/^\d+(\.\d+)?e[+-]?\d+$/i.test(fmtCell) || Math.abs(rawCell) >= 1e11)
+      ) {
+        rowCells.push(
+          Math.round(rawCell).toLocaleString('fullwide', {
+            useGrouping: false,
+          })
+        );
+      } else {
+        rowCells.push(fmtCell || String(rawCell ?? '').trim());
+      }
+    }
+    if (rowCells.some((cell) => cell !== '')) {
+      out.push(rowCells);
+    }
+  }
+  return out;
 }
 
 export function parsePastedTextToRows(text: string): string[][] {
@@ -353,13 +388,17 @@ function isHeaderRow(firstRow: string[], keywords: string[]): boolean {
   return keywords.some((k) => joined.includes(k));
 }
 
+function createCompactBaseId(): number {
+  return (Date.now() % 800000) + 100000;
+}
+
 export function parseBulkClasses(rows: string[][]): ClassItem[] {
   if (rows.length === 0) return [];
   const dataRows = isHeaderRow(rows[0], ['tingkat', 'rombel', 'wali', 'konsentrasi'])
     ? rows.slice(1)
     : rows;
 
-  const baseId = Date.now();
+  const baseId = createCompactBaseId();
   return dataRows
     .filter((r) => r.length >= 2 && (r[0] || r[1]))
     .map((r, idx) => {
@@ -393,7 +432,7 @@ export function parseBulkStudents(
     ? rows.slice(1)
     : rows;
 
-  const baseId = Date.now();
+  const baseId = createCompactBaseId();
   return dataRows
     .filter((r) => r.length >= 1 && r[0])
     .map((r, idx) => {
@@ -433,7 +472,7 @@ export function parseBulkWaliKelasUsers(rows: string[][]): UserAccount[] {
     ? rows.slice(1)
     : rows;
 
-  const baseId = Date.now();
+  const baseId = createCompactBaseId();
   return dataRows
     .filter((r) => r.length >= 2 && r[0])
     .map((r, idx) => {
@@ -481,7 +520,7 @@ export function parseBulkGuruMapelUsers(rows: string[][]): UserAccount[] {
     ? rows.slice(1)
     : rows;
 
-  const baseId = Date.now();
+  const baseId = createCompactBaseId();
   return dataRows
     .filter((r) => r.length >= 1 && r[0])
     .map((r, idx) => {

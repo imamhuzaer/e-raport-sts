@@ -915,8 +915,10 @@ export default function App() {
       showToast('Nama kelas tidak boleh kosong.', 'danger');
       return;
     }
+    const nextClsId =
+      classes.reduce((max, c) => Math.max(max, c.id || 0), 0) + 1;
     const createdClass: ClassItem = {
-      id: Date.now(),
+      id: nextClsId,
       grade: newClass.grade,
       name: newClass.name.trim(),
       major: newClass.major.trim() || 'Teknik Kendaraan Ringan',
@@ -1068,7 +1070,8 @@ export default function App() {
       grade: '10',
       major: 'Teknik Kendaraan Ringan',
     };
-    const newId = Date.now();
+    const newId =
+      students.reduce((max, s) => Math.max(max, s.id || 100), 100) + 1;
     const createdStudent: StudentItem = {
       id: newId,
       nis:
@@ -1150,8 +1153,10 @@ export default function App() {
       return;
     }
 
+    const nextUsrId =
+      users.reduce((max, u) => Math.max(max, u.id || 0), 0) + 1;
     const createdUser: UserAccount = {
-      id: Date.now(),
+      id: nextUsrId,
       name: newUser.name.trim(),
       nip: newUser.nip.trim() || '-',
       username: newUser.username.trim(),
@@ -1323,12 +1328,17 @@ export default function App() {
           const clsNames = new Set(
             nextClasses.map((c) => c.name.trim().toLowerCase())
           );
+          let maxClassId = nextClasses.reduce(
+            (max, c) => Math.max(max, c.id || 0),
+            0
+          );
           parsedStudents.forEach((st) => {
             const key = st.className.trim().toLowerCase();
             if (key && !clsNames.has(key)) {
               clsNames.add(key);
+              maxClassId += 1;
               nextClasses.push({
-                id: Date.now() + Math.floor(Math.random() * 10000),
+                id: maxClassId,
                 name: st.className,
                 grade: st.grade,
                 major: st.major,
@@ -1404,8 +1414,10 @@ export default function App() {
                 : pu.waliKelasFor.startsWith('11')
                 ? '11'
                 : '10';
+              const nextClsId =
+                nextClasses.reduce((max, c) => Math.max(max, c.id || 0), 0) + 1;
               nextClasses.push({
-                id: Date.now() + Math.floor(Math.random() * 10000),
+                id: nextClsId,
                 name: pu.waliKelasFor,
                 grade,
                 major: 'Teknik Kendaraan Ringan',

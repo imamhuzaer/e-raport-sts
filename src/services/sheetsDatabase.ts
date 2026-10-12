@@ -103,10 +103,181 @@ export function saveGasBridgeUrl(url: string): void {
   }
 }
 
+export function sanitizeDatabasePayload(
+  payload: DatabasePayload
+): DatabasePayload {
+  const seenClassIds = new Set<number>();
+  let nextClassId = 1;
+  const getNextClassId = () => {
+    while (seenClassIds.has(nextClassId)) nextClassId++;
+    const id = nextClassId;
+    seenClassIds.add(id);
+    return id;
+  };
+
+  const rawClasses = Array.isArray(payload.classes) ? payload.classes : [];
+  const classIdCounts = new Map<number, number>();
+  rawClasses.forEach((c) => {
+    const numId = Number(c?.id);
+    if (Number.isFinite(numId) && numId > 0) {
+      classIdCounts.set(numId, (classIdCounts.get(numId) || 0) + 1);
+    }
+  });
+
+  const classes: ClassItem[] = rawClasses.map((c) => {
+    const numId = Number(c?.id);
+    const isTruncatedSci = numId >= 1_000_000_000_000 && numId % 100000 === 0;
+    const isValidUnique =
+      Number.isFinite(numId) &&
+      numId > 0 &&
+      !isTruncatedSci &&
+      (classIdCounts.get(numId) || 0) === 1 &&
+      !seenClassIds.has(numId);
+
+    if (isValidUnique) {
+      seenClassIds.add(numId);
+      return { ...c, id: numId };
+    }
+    return { ...c, id: getNextClassId() };
+  });
+
+  const seenUserIds = new Set<number>();
+  let nextUserId = 1;
+  const getNextUserId = () => {
+    while (seenUserIds.has(nextUserId)) nextUserId++;
+    const id = nextUserId;
+    seenUserIds.add(id);
+    return id;
+  };
+
+  const rawUsers = Array.isArray(payload.users) ? payload.users : [];
+  const userIdCounts = new Map<number, number>();
+  rawUsers.forEach((u) => {
+    const numId = Number(u?.id);
+    if (Number.isFinite(numId) && numId > 0) {
+      userIdCounts.set(numId, (userIdCounts.get(numId) || 0) + 1);
+    }
+  });
+
+  const users: UserAccount[] = rawUsers.map((u) => {
+    const numId = Number(u?.id);
+    const isTruncatedSci = numId >= 1_000_000_000_000 && numId % 100000 === 0;
+    const isValidUnique =
+      Number.isFinite(numId) &&
+      numId > 0 &&
+      !isTruncatedSci &&
+      (userIdCounts.get(numId) || 0) === 1 &&
+      !seenUserIds.has(numId);
+
+    if (isValidUnique) {
+      seenUserIds.add(numId);
+      return { ...u, id: numId };
+    }
+    return { ...u, id: getNextUserId() };
+  });
+
+  const seenStudentIds = new Set<number>();
+  let nextStudentId = 101;
+  const getNextStudentId = () => {
+    while (seenStudentIds.has(nextStudentId)) nextStudentId++;
+    const id = nextStudentId;
+    seenStudentIds.add(id);
+    return id;
+  };
+
+  const rawStudents = Array.isArray(payload.students) ? payload.students : [];
+  const studentIdCounts = new Map<number, number>();
+  rawStudents.forEach((s) => {
+    const numId = Number(s?.id);
+    if (Number.isFinite(numId) && numId > 0) {
+      studentIdCounts.set(numId, (studentIdCounts.get(numId) || 0) + 1);
+    }
+  });
+
+  const rawGrades = payload.studentGrades || {};
+  const studentGrades: StudentGradesMap = {};
+
+  const students: StudentItem[] = rawStudents.map((s) => {
+    const oldId = Number(s?.id);
+    const isTruncatedSci = oldId >= 1_000_000_000_000 && oldId % 100000 === 0;
+    const isValidUnique =
+      Number.isFinite(oldId) &&
+      oldId > 0 &&
+      !isTruncatedSci &&
+      (studentIdCounts.get(oldId) || 0) === 1 &&
+      !seenStudentIds.has(oldId);
+
+    const finalId = isValidUnique ? oldId : getNextStudentId();
+    seenStudentIds.add(finalId);
+
+    const existingGradeMap = rawGrades[finalId] || rawGrades[oldId] || {};
+    studentGrades[finalId] = { ...existingGradeMap };
+
+    return {
+      ...s,
+      id: finalId,
+    };
+  });
+
+  return {
+    school: payload.school || { ...DEFAULT_SCHOOL },
+    classes,
+    students,
+    users,
+    studentGrades,
+  };
+}
+
+function sheetToCleanStringRows(sheet: XLSX.WorkSheet): string[][] {
+  const rawRows = XLSX.utils.sheet_to_json<(string | number | boolean)[]>(
+    sheet,
+    {
+      header: 1,
+      defval: '',
+      raw: true,
+    }
+  );
+  const fmtRows = XLSX.utils.sheet_to_json<(string | number)[]>(sheet, {
+    header: 1,
+    defval: '',
+    raw: false,
+  });
+
+  const rowCount = Math.max(rawRows.length, fmtRows.length);
+  const result: string[][] = [];
+
+  for (let r = 0; r < rowCount; r++) {
+    const rawRow = rawRows[r] || [];
+    const fmtRow = fmtRows[r] || [];
+    const colCount = Math.max(rawRow.length, fmtRow.length);
+    const rowOut: string[] = [];
+    for (let c = 0; c < colCount; c++) {
+      const rawCell = rawRow[c];
+      const fmtCell = String(fmtRow[c] ?? '').trim();
+      if (
+        typeof rawCell === 'number' &&
+        Number.isFinite(rawCell) &&
+        (/^\d+(\.\d+)?e[+-]?\d+$/i.test(fmtCell) || Math.abs(rawCell) >= 1e11)
+      ) {
+        rowOut.push(
+          Math.round(rawCell).toLocaleString('fullwide', {
+            useGrouping: false,
+          })
+        );
+      } else {
+        rowOut.push(fmtCell || String(rawCell ?? '').trim());
+      }
+    }
+    result.push(rowOut);
+  }
+  return result;
+}
+
 export function saveLocalDatabaseCache(payload: DatabasePayload): void {
   if (typeof window === 'undefined') return;
   try {
-    localStorage.setItem(LOCAL_DB_CACHE_KEY, JSON.stringify(payload));
+    const clean = sanitizeDatabasePayload(payload);
+    localStorage.setItem(LOCAL_DB_CACHE_KEY, JSON.stringify(clean));
   } catch {
     // Ignore storage quota errors
   }
@@ -124,7 +295,9 @@ export function loadLocalDatabaseCache(): DatabasePayload | null {
       Array.isArray(parsed.classes) &&
       Array.isArray(parsed.students)
     ) {
-      return parsed;
+      const sanitized = sanitizeDatabasePayload(parsed);
+      localStorage.setItem(LOCAL_DB_CACHE_KEY, JSON.stringify(sanitized));
+      return sanitized;
     }
   } catch {
     // Ignore parse error
@@ -222,14 +395,16 @@ function parseSheetTabsToDatabase(
     }
   }
 
-  // Parse Classes
+  // Parse Classes with guaranteed unique IDs
   let classes: ClassItem[] = [...DEFAULT_CLASSES];
   const kelasRows = tabValuesMap['Kelas'] || [];
   if (kelasRows.length > 1) {
+    const usedClassIds = new Set<number>();
+    let nextClassId = 1;
     classes = kelasRows
       .slice(1)
       .filter((r) => r.length >= 2 && r[1])
-      .map((r, idx) => {
+      .map((r) => {
         const rawWaliSigType = String(r[6] || 'none')
           .trim()
           .toLowerCase();
@@ -237,8 +412,20 @@ function parseSheetTabsToDatabase(
           rawWaliSigType === 'signature' || rawWaliSigType === 'qrcode'
             ? rawWaliSigType
             : 'none';
+        let id = Number(r[0]);
+        const isTruncatedSci = id >= 1_000_000_000_000 && id % 100000 === 0;
+        if (
+          !Number.isFinite(id) ||
+          id <= 0 ||
+          isTruncatedSci ||
+          usedClassIds.has(id)
+        ) {
+          while (usedClassIds.has(nextClassId)) nextClassId++;
+          id = nextClassId;
+        }
+        usedClassIds.add(id);
         return {
-          id: Number(r[0]) || idx + 1,
+          id,
           name: String(r[1] || '').trim(),
           grade: String(r[2] || '10').trim(),
           major: String(r[3] || 'Teknik Kendaraan Ringan').trim(),
@@ -250,14 +437,16 @@ function parseSheetTabsToDatabase(
       });
   }
 
-  // Parse Users
+  // Parse Users with guaranteed unique IDs
   let users: UserAccount[] = JSON.parse(JSON.stringify(DEFAULT_USERS));
   const userRows = tabValuesMap['Users'] || [];
   if (userRows.length > 1) {
+    const usedUserIds = new Set<number>();
+    let nextUserId = 1;
     users = userRows
       .slice(1)
       .filter((r) => r.length >= 3 && r[1])
-      .map((r, idx) => {
+      .map((r) => {
         const rawRoles = String(r[5] || 'gurumapel')
           .split(',')
           .map((x) => x.trim().toLowerCase())
@@ -272,8 +461,20 @@ function parseSheetTabsToDatabase(
           rawUserSigType === 'signature' || rawUserSigType === 'qrcode'
             ? rawUserSigType
             : 'none';
+        let id = Number(r[0]);
+        const isTruncatedSci = id >= 1_000_000_000_000 && id % 100000 === 0;
+        if (
+          !Number.isFinite(id) ||
+          id <= 0 ||
+          isTruncatedSci ||
+          usedUserIds.has(id)
+        ) {
+          while (usedUserIds.has(nextUserId)) nextUserId++;
+          id = nextUserId;
+        }
+        usedUserIds.add(id);
         return {
-          id: Number(r[0]) || idx + 1,
+          id,
           username: String(r[1] || '').trim(),
           password: String(r[2] || '123').trim(),
           name: String(r[3] || r[1] || '').trim(),
@@ -286,7 +487,7 @@ function parseSheetTabsToDatabase(
       });
   }
 
-  // Parse Students & Grades
+  // Parse Students & Grades with guaranteed unique IDs
   let students: StudentItem[] = [];
   const studentGrades: StudentGradesMap = {};
 
@@ -294,11 +495,32 @@ function parseSheetTabsToDatabase(
   const nilaiRows = tabValuesMap['Nilai'] || [];
 
   if (siswaRows.length > 1) {
+    const usedStudentIds = new Set<number>();
+    let nextStudentId = 101;
+    const rawIdToNewIdsMap = new Map<number, number[]>();
+
     students = siswaRows
       .slice(1)
       .filter((r) => r.length >= 4 && r[3])
-      .map((r, idx) => {
-        const id = Number(r[0]) || 100 + idx + 1;
+      .map((r) => {
+        const rawId = Number(r[0]);
+        let id = rawId;
+        const isTruncatedSci = id >= 1_000_000_000_000 && id % 100000 === 0;
+        if (
+          !Number.isFinite(id) ||
+          id <= 0 ||
+          isTruncatedSci ||
+          usedStudentIds.has(id)
+        ) {
+          while (usedStudentIds.has(nextStudentId)) nextStudentId++;
+          id = nextStudentId;
+        }
+        usedStudentIds.add(id);
+        if (Number.isFinite(rawId) && rawId > 0) {
+          const list = rawIdToNewIdsMap.get(rawId) || [];
+          list.push(id);
+          rawIdToNewIdsMap.set(rawId, list);
+        }
         studentGrades[id] = {};
         return {
           id,
@@ -319,22 +541,104 @@ function parseSheetTabsToDatabase(
         };
       });
 
+    // Build student lookup maps for accurate grade resolution even if raw Student IDs collided
+    const byNameAndClass = new Map<string, number>();
+    const byNameOnly = new Map<string, number>();
+    const byNisn = new Map<string, number>();
+    students.forEach((st) => {
+      const nameKey = st.name.trim().toLowerCase();
+      const clsKey = st.className.trim().toLowerCase();
+      byNameAndClass.set(`${nameKey}|${clsKey}`, st.id);
+      if (!byNameOnly.has(nameKey)) {
+        byNameOnly.set(nameKey, st.id);
+      }
+      if (st.nisn) {
+        byNisn.set(st.nisn.trim().toLowerCase(), st.id);
+      }
+    });
+
     if (nilaiRows.length > 1) {
       nilaiRows.slice(1).forEach((r) => {
-        const stId = Number(r[0]);
+        const rawStId = Number(r[0]);
+        const stName = String(r[1] || '').trim().toLowerCase();
+        const stClass = String(r[2] || '').trim().toLowerCase();
         const subjectName = String(r[3] || '').trim();
         const scoreVal = r[4];
+
         if (
-          stId &&
           subjectName &&
           scoreVal !== undefined &&
           String(scoreVal).trim() !== ''
         ) {
-          if (!studentGrades[stId]) studentGrades[stId] = {};
           const num = Number(scoreVal);
           if (!Number.isNaN(num)) {
-            studentGrades[stId][subjectName] = num;
+            let targetStId: number | undefined;
+            if (stName && stClass && byNameAndClass.has(`${stName}|${stClass}`)) {
+              targetStId = byNameAndClass.get(`${stName}|${stClass}`);
+            } else if (stName && byNameOnly.has(stName)) {
+              targetStId = byNameOnly.get(stName);
+            } else if (rawStId) {
+              const mappedIds = rawIdToNewIdsMap.get(rawStId);
+              if (mappedIds && mappedIds.length === 1) {
+                targetStId = mappedIds[0];
+              } else if (studentGrades[rawStId]) {
+                targetStId = rawStId;
+              }
+            }
+
+            if (targetStId !== undefined) {
+              if (!studentGrades[targetStId]) studentGrades[targetStId] = {};
+              studentGrades[targetStId][subjectName] = num;
+            }
           }
+        }
+      });
+    }
+
+    // Also recover any grades present in gid0Rows (Master_Leger) if missing from Nilai
+    if (hasGid0Data) {
+      const headers = gid0Rows[0].map((h) => String(h || '').trim());
+      const lowerHeaders = headers.map((h) => h.toLowerCase());
+      const idxNisn = lowerHeaders.findIndex((h) => h === 'nisn');
+      const idxName = lowerHeaders.findIndex(
+        (h) => h.includes('nama') || h.includes('name') || h.includes('siswa')
+      );
+      const idxClass = lowerHeaders.findIndex(
+        (h) => h.includes('kelas') || h.includes('rombel') || h === 'classname'
+      );
+      const allSubjects = getAllSubjectNames();
+
+      gid0Rows.slice(1).forEach((r) => {
+        const rowNisn =
+          idxNisn !== -1 ? String(r[idxNisn] || '').trim().toLowerCase() : '';
+        const rowName =
+          idxName !== -1 ? String(r[idxName] || '').trim().toLowerCase() : '';
+        const rowClass =
+          idxClass !== -1 ? String(r[idxClass] || '').trim().toLowerCase() : '';
+
+        const targetStId =
+          (rowName && rowClass && byNameAndClass.get(`${rowName}|${rowClass}`)) ||
+          (rowNisn && byNisn.get(rowNisn)) ||
+          (rowName && byNameOnly.get(rowName));
+
+        if (targetStId !== undefined) {
+          if (!studentGrades[targetStId]) studentGrades[targetStId] = {};
+          headers.forEach((hName, colIndex) => {
+            const matchedSub = allSubjects.find(
+              (sub) => sub.toLowerCase() === hName.toLowerCase()
+            );
+            if (
+              matchedSub &&
+              studentGrades[targetStId][matchedSub] === undefined &&
+              r[colIndex] !== undefined &&
+              String(r[colIndex]).trim() !== ''
+            ) {
+              const val = Number(r[colIndex]);
+              if (!Number.isNaN(val)) {
+                studentGrades[targetStId][matchedSub] = val;
+              }
+            }
+          });
         }
       });
     }
@@ -371,12 +675,25 @@ function parseSheetTabsToDatabase(
     const allSubjects = getAllSubjectNames();
 
     if (idxName !== -1) {
+      const usedStudentIds = new Set<number>();
+      let nextStudentId = 101;
       students = gid0Rows
         .slice(1)
         .filter((r) => r[idxName] && String(r[idxName]).trim() !== '')
         .map((r, i) => {
-          const stId =
-            (idxId !== -1 ? Number(r[idxId]) : 0) || 100 + i + 1;
+          let stId = idxId !== -1 ? Number(r[idxId]) : 0;
+          const isTruncatedSci =
+            stId >= 1_000_000_000_000 && stId % 100000 === 0;
+          if (
+            !Number.isFinite(stId) ||
+            stId <= 0 ||
+            isTruncatedSci ||
+            usedStudentIds.has(stId)
+          ) {
+            while (usedStudentIds.has(nextStudentId)) nextStudentId++;
+            stId = nextStudentId;
+          }
+          usedStudentIds.add(stId);
           const clsName =
             String(idxClass !== -1 ? r[idxClass] : '').trim() || '10 TKR 1';
           const inferredGrade =
@@ -430,11 +747,13 @@ function parseSheetTabsToDatabase(
         });
 
       const existingClassNames = new Set(classes.map((c) => c.name));
+      let maxClsId = classes.reduce((acc, c) => Math.max(acc, c.id || 0), 0);
       students.forEach((st) => {
         if (st.className && !existingClassNames.has(st.className)) {
           existingClassNames.add(st.className);
+          maxClsId += 1;
           classes.push({
-            id: Date.now() + Math.floor(Math.random() * 1000),
+            id: maxClsId,
             name: st.className,
             grade: st.grade,
             major: st.major,
@@ -486,13 +805,13 @@ function parseSheetTabsToDatabase(
     return cls;
   });
 
-  const payload: DatabasePayload = {
+  const payload = sanitizeDatabasePayload({
     school,
     classes,
     students,
     users,
     studentGrades,
-  };
+  });
   saveLocalDatabaseCache(payload);
 
   return {
@@ -575,14 +894,7 @@ export async function fetchFromGoogleSheetsPublic(): Promise<{
       tabs.forEach((tabName) => {
         const sheet = wb.Sheets[tabName];
         if (sheet) {
-          const rows = XLSX.utils.sheet_to_json<(string | number)[]>(sheet, {
-            header: 1,
-            defval: '',
-            raw: false,
-          });
-          tabValuesMap[tabName] = rows.map((r) =>
-            r.map((cell) => String(cell ?? '').trim())
-          );
+          tabValuesMap[tabName] = sheetToCleanStringRows(sheet);
         }
       });
 
@@ -615,17 +927,7 @@ export async function fetchFromGoogleSheetsPublic(): Promise<{
         const wb = XLSX.read(csvText, { type: 'string' });
         const firstSheet = wb.Sheets[wb.SheetNames[0]];
         if (firstSheet) {
-          const rows = XLSX.utils.sheet_to_json<(string | number)[]>(
-            firstSheet,
-            {
-              header: 1,
-              defval: '',
-              raw: false,
-            }
-          );
-          tabValuesMap[tabName] = rows.map((r) =>
-            r.map((c) => String(c ?? '').trim())
-          );
+          tabValuesMap[tabName] = sheetToCleanStringRows(firstSheet);
           detectedTabs.push(tabName);
         }
       }
