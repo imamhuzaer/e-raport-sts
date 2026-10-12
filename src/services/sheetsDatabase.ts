@@ -1,3 +1,4 @@
+import * as XLSX from 'xlsx';
 import {
   ClassItem,
   DatabasePayload,
@@ -22,9 +23,55 @@ export interface SheetMetadataInfo {
   gid0PreviewRows: string[][];
   hasStructuredTabs: boolean;
   lastSyncedAt: string;
+  connectionMode?: 'oauth' | 'public_direct' | 'gas_bridge';
 }
 
 const REQUIRED_TABS = ['Sekolah', 'Kelas', 'Siswa', 'Users', 'Nilai'];
+const LOCAL_DB_CACHE_KEY = 'eraport_smkn1_db_cache_v2';
+const GAS_BRIDGE_URL_KEY = 'eraport_smkn1_gas_bridge_url';
+
+export function getSavedGasBridgeUrl(): string {
+  if (typeof window === 'undefined') return '';
+  return localStorage.getItem(GAS_BRIDGE_URL_KEY) || '';
+}
+
+export function saveGasBridgeUrl(url: string): void {
+  if (typeof window === 'undefined') return;
+  if (url.trim()) {
+    localStorage.setItem(GAS_BRIDGE_URL_KEY, url.trim());
+  } else {
+    localStorage.removeItem(GAS_BRIDGE_URL_KEY);
+  }
+}
+
+export function saveLocalDatabaseCache(payload: DatabasePayload): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(LOCAL_DB_CACHE_KEY, JSON.stringify(payload));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+export function loadLocalDatabaseCache(): DatabasePayload | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(LOCAL_DB_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as DatabasePayload;
+    if (
+      parsed &&
+      parsed.school &&
+      Array.isArray(parsed.classes) &&
+      Array.isArray(parsed.students)
+    ) {
+      return parsed;
+    }
+  } catch {
+    // Ignore parse error
+  }
+  return null;
+}
 
 function getAllSubjectNames(): string[] {
   const set = new Set<string>();
@@ -35,79 +82,20 @@ function getAllSubjectNames(): string[] {
   return Array.from(set);
 }
 
-export async function fetchFromGoogleSheets(accessToken: string): Promise<{
+function parseSheetTabsToDatabase(
+  tabValuesMap: Record<string, string[][]>,
+  gid0Rows: string[][],
+  spreadsheetTitle: string,
+  gid0Title: string,
+  tabs: string[],
+  connectionMode: 'oauth' | 'public_direct' | 'gas_bridge' = 'oauth'
+): {
   payload: DatabasePayload;
   meta: SheetMetadataInfo;
   isEmptySheet: boolean;
-}> {
-  // 1. Fetch spreadsheet metadata
-  const metaRes = await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}`,
-    {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    }
-  );
-
-  if (!metaRes.ok) {
-    const errBody = await metaRes.json().catch(() => ({}));
-    const msg = errBody?.error?.message || `HTTP ${metaRes.status}`;
-    throw new Error(`Gagal mengakses Google Sheet: ${msg}`);
-  }
-
-  const metaJson = await metaRes.json();
-  const spreadsheetTitle: string = metaJson.properties?.title || 'Database E-Raport STS';
-  const sheetsList: Array<{ properties: { title: string; sheetId: number } }> =
-    metaJson.sheets || [];
-
-  const tabs = sheetsList.map((s) => s.properties.title);
-  const gid0Sheet =
-    sheetsList.find((s) => s.properties.sheetId === 0) || sheetsList[0];
-  const gid0Title = gid0Sheet ? gid0Sheet.properties.title : 'Sheet1';
-
+} {
   const hasStructuredTabs = REQUIRED_TABS.every((t) => tabs.includes(t));
 
-  // Build ranges to batchGet
-  const rangesToFetch: string[] = [`'${gid0Title}'!A1:Z200`];
-  REQUIRED_TABS.forEach((tab) => {
-    if (tabs.includes(tab)) {
-      rangesToFetch.push(`'${tab}'!A1:Z500`);
-    }
-  });
-
-  const params = rangesToFetch
-    .map((r) => `ranges=${encodeURIComponent(r)}`)
-    .join('&');
-  const valRes = await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}/values:batchGet?${params}`,
-    {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    }
-  );
-
-  if (!valRes.ok) {
-    const errBody = await valRes.json().catch(() => ({}));
-    throw new Error(
-      errBody?.error?.message || 'Gagal membaca isi tabel dari Google Sheet.'
-    );
-  }
-
-  const valJson = await valRes.json();
-  const valueRanges: Array<{ range: string; values?: string[][] }> =
-    valJson.valueRanges || [];
-
-  const gid0Rows: string[][] = valueRanges[0]?.values || [];
-
-  // Map tab name -> values
-  const tabValuesMap: Record<string, string[][]> = {};
-  let rangeIdx = 1;
-  REQUIRED_TABS.forEach((tab) => {
-    if (tabs.includes(tab)) {
-      tabValuesMap[tab] = valueRanges[rangeIdx]?.values || [];
-      rangeIdx++;
-    }
-  });
-
-  // Check if the spreadsheet is completely empty
   const hasAnyStructuredData = Object.values(tabValuesMap).some(
     (rows) => rows && rows.length > 1
   );
@@ -129,6 +117,7 @@ export async function fetchFromGoogleSheets(accessToken: string): Promise<{
         gid0PreviewRows: gid0Rows.slice(0, 15),
         hasStructuredTabs,
         lastSyncedAt: new Date().toLocaleTimeString('id-ID'),
+        connectionMode,
       },
       isEmptySheet: true,
     };
@@ -140,8 +129,15 @@ export async function fetchFromGoogleSheets(accessToken: string): Promise<{
   if (sekolahRows.length > 1) {
     const kv: Record<string, string> = {};
     sekolahRows.slice(1).forEach((r) => {
-      if (r[0]) kv[r[0].trim()] = r[1] ?? '';
+      if (r[0]) kv[String(r[0]).trim()] = String(r[1] ?? '');
     });
+    if (
+      sekolahRows[0] &&
+      sekolahRows[0][0] &&
+      String(sekolahRows[0][0]).toLowerCase() !== 'key'
+    ) {
+      kv[String(sekolahRows[0][0]).trim()] = String(sekolahRows[0][1] ?? '');
+    }
     school = {
       name: kv['name'] || DEFAULT_SCHOOL.name,
       npsn: kv['npsn'] || DEFAULT_SCHOOL.npsn,
@@ -152,6 +148,9 @@ export async function fetchFromGoogleSheets(accessToken: string): Promise<{
       tp: kv['tp'] || DEFAULT_SCHOOL.tp,
       datePrint: kv['datePrint'] || DEFAULT_SCHOOL.datePrint,
     };
+    if (kv['gasBridgeUrl'] && !getSavedGasBridgeUrl()) {
+      saveGasBridgeUrl(kv['gasBridgeUrl']);
+    }
   }
 
   // Parse Classes
@@ -163,11 +162,11 @@ export async function fetchFromGoogleSheets(accessToken: string): Promise<{
       .filter((r) => r.length >= 2 && r[1])
       .map((r, idx) => ({
         id: Number(r[0]) || idx + 1,
-        name: r[1] || '',
-        grade: r[2] || '10',
-        major: r[3] || 'Teknik Kendaraan Ringan',
-        waliKelasName: r[4] || '-',
-        waliKelasNip: r[5] || '-',
+        name: String(r[1] || '').trim(),
+        grade: String(r[2] || '10').trim(),
+        major: String(r[3] || 'Teknik Kendaraan Ringan').trim(),
+        waliKelasName: String(r[4] || '-').trim(),
+        waliKelasNip: String(r[5] || '-').trim(),
       }));
   }
 
@@ -179,7 +178,7 @@ export async function fetchFromGoogleSheets(accessToken: string): Promise<{
       .slice(1)
       .filter((r) => r.length >= 3 && r[1])
       .map((r, idx) => {
-        const rawRoles = (r[5] || 'gurumapel')
+        const rawRoles = String(r[5] || 'gurumapel')
           .split(',')
           .map((x) => x.trim().toLowerCase())
           .filter(
@@ -188,12 +187,12 @@ export async function fetchFromGoogleSheets(accessToken: string): Promise<{
           );
         return {
           id: Number(r[0]) || idx + 1,
-          username: r[1] || '',
-          password: r[2] || '123',
-          name: r[3] || r[1] || '',
-          nip: r[4] || '',
+          username: String(r[1] || '').trim(),
+          password: String(r[2] || '123').trim(),
+          name: String(r[3] || r[1] || '').trim(),
+          nip: String(r[4] || '').trim(),
           roles: rawRoles.length > 0 ? rawRoles : ['gurumapel'],
-          waliKelasFor: r[6] || '',
+          waliKelasFor: String(r[6] || '').trim(),
         };
       });
   }
@@ -214,27 +213,34 @@ export async function fetchFromGoogleSheets(accessToken: string): Promise<{
         studentGrades[id] = {};
         return {
           id,
-          nis: r[1] || '',
-          nisn: r[2] || '',
-          name: r[3] || '',
-          className: r[4] || '10 TKR 1',
-          grade: r[5] || '10',
-          major: r[6] || 'Teknik Kendaraan Ringan',
+          nis: String(r[1] || '').trim(),
+          nisn: String(r[2] || '').trim(),
+          name: String(r[3] || '').trim(),
+          className: String(r[4] || '10 TKR 1').trim(),
+          grade: String(r[5] || '10').trim(),
+          major: String(r[6] || 'Teknik Kendaraan Ringan').trim(),
           attendance: {
             sakit: Number(r[7]) || 0,
             izin: Number(r[8]) || 0,
             alpa: Number(r[9]) || 0,
           },
-          note: r[10] || 'Tingkatkan terus motivasi dan kedisiplinan belajar.',
+          note:
+            String(r[10] || '').trim() ||
+            'Tingkatkan terus motivasi dan kedisiplinan belajar.',
         };
       });
 
     if (nilaiRows.length > 1) {
       nilaiRows.slice(1).forEach((r) => {
         const stId = Number(r[0]);
-        const subjectName = r[3];
+        const subjectName = String(r[3] || '').trim();
         const scoreVal = r[4];
-        if (stId && subjectName && scoreVal !== undefined && scoreVal !== '') {
+        if (
+          stId &&
+          subjectName &&
+          scoreVal !== undefined &&
+          String(scoreVal).trim() !== ''
+        ) {
           if (!studentGrades[stId]) studentGrades[stId] = {};
           const num = Number(scoreVal);
           if (!Number.isNaN(num)) {
@@ -244,8 +250,7 @@ export async function fetchFromGoogleSheets(accessToken: string): Promise<{
       });
     }
   } else if (hasGid0Data) {
-    // Parse directly from gid=0 if Siswa tab isn't populated yet
-    const headers = gid0Rows[0].map((h) => (h || '').trim());
+    const headers = gid0Rows[0].map((h) => String(h || '').trim());
     const lowerHeaders = headers.map((h) => h.toLowerCase());
 
     const idxId = lowerHeaders.findIndex((h) => h === 'id' || h === 'no');
@@ -279,30 +284,33 @@ export async function fetchFromGoogleSheets(accessToken: string): Promise<{
     if (idxName !== -1) {
       students = gid0Rows
         .slice(1)
-        .filter((r) => r[idxName] && r[idxName].trim() !== '')
+        .filter((r) => r[idxName] && String(r[idxName]).trim() !== '')
         .map((r, i) => {
           const stId =
             (idxId !== -1 ? Number(r[idxId]) : 0) || 100 + i + 1;
           const clsName =
-            (idxClass !== -1 ? r[idxClass] : '') || '10 TKR 1';
+            String(idxClass !== -1 ? r[idxClass] : '').trim() || '10 TKR 1';
           const inferredGrade =
-            (idxGrade !== -1 ? r[idxGrade] : '') ||
+            String(idxGrade !== -1 ? r[idxGrade] : '').trim() ||
             (clsName.startsWith('12')
               ? '12'
               : clsName.startsWith('11')
               ? '11'
               : '10');
           const major =
-            (idxMajor !== -1 ? r[idxMajor] : '') ||
+            String(idxMajor !== -1 ? r[idxMajor] : '').trim() ||
             'Teknik Kendaraan Ringan';
 
           studentGrades[stId] = {};
-          // Extract any subject columns present in gid=0
           headers.forEach((hName, colIndex) => {
             const matchedSub = allSubjects.find(
               (sub) => sub.toLowerCase() === hName.toLowerCase()
             );
-            if (matchedSub && r[colIndex] !== undefined && r[colIndex] !== '') {
+            if (
+              matchedSub &&
+              r[colIndex] !== undefined &&
+              String(r[colIndex]).trim() !== ''
+            ) {
               const val = Number(r[colIndex]);
               if (!Number.isNaN(val)) {
                 studentGrades[stId][matchedSub] = val;
@@ -312,9 +320,12 @@ export async function fetchFromGoogleSheets(accessToken: string): Promise<{
 
           return {
             id: stId,
-            nis: (idxNis !== -1 ? r[idxNis] : '') || `2026100${i + 1}`,
-            nisn: (idxNisn !== -1 ? r[idxNisn] : '') || `008123456${i + 1}`,
-            name: r[idxName].trim().toUpperCase(),
+            nis:
+              String(idxNis !== -1 ? r[idxNis] : '').trim() || `2026100${i + 1}`,
+            nisn:
+              String(idxNisn !== -1 ? r[idxNisn] : '').trim() ||
+              `008123456${i + 1}`,
+            name: String(r[idxName]).trim().toUpperCase(),
             className: clsName,
             grade: inferredGrade,
             major,
@@ -324,12 +335,11 @@ export async function fetchFromGoogleSheets(accessToken: string): Promise<{
               alpa: idxAlpa !== -1 ? Number(r[idxAlpa]) || 0 : 0,
             },
             note:
-              (idxNote !== -1 ? r[idxNote] : '') ||
+              String(idxNote !== -1 ? r[idxNote] : '').trim() ||
               'Tingkatkan terus motivasi dan kedisiplinan belajar.',
           };
         });
 
-      // Ensure classes from gid=0 exist in classes list
       const existingClassNames = new Set(classes.map((c) => c.name));
       students.forEach((st) => {
         if (st.className && !existingClassNames.has(st.className)) {
@@ -345,7 +355,6 @@ export async function fetchFromGoogleSheets(accessToken: string): Promise<{
         }
       });
     } else {
-      // Fallback to default students if gid=0 has unstructured rows
       students = JSON.parse(JSON.stringify(DEFAULT_STUDENTS));
       Object.assign(
         studentGrades,
@@ -355,6 +364,7 @@ export async function fetchFromGoogleSheets(accessToken: string): Promise<{
   }
 
   // Cross-link Wali Kelas from Users into Classes if missing
+  const normKey = (s?: string) => (s || '').replace(/\s+/g, '').toLowerCase();
   classes = classes.map((cls) => {
     const isMissingWali =
       !cls.waliKelasName ||
@@ -366,7 +376,7 @@ export async function fetchFromGoogleSheets(accessToken: string): Promise<{
       (u) =>
         u.roles.includes('walikelas') &&
         u.waliKelasFor &&
-        u.waliKelasFor.trim().toLowerCase() === cls.name.trim().toLowerCase()
+        normKey(u.waliKelasFor) === normKey(cls.name)
     );
 
     if (matchedWaliUser) {
@@ -381,30 +391,470 @@ export async function fetchFromGoogleSheets(accessToken: string): Promise<{
     return cls;
   });
 
+  const payload: DatabasePayload = {
+    school,
+    classes,
+    students,
+    users,
+    studentGrades,
+  };
+  saveLocalDatabaseCache(payload);
+
   return {
-    payload: {
-      school,
-      classes,
-      students,
-      users,
-      studentGrades,
-    },
+    payload,
     meta: {
       spreadsheetTitle,
       gid0Title,
       tabs,
-      gid0PreviewRows: gid0Rows.slice(0, 15),
+      gid0PreviewRows: gid0Rows.slice(0, 15).map((r) => r.map(String)),
       hasStructuredTabs,
       lastSyncedAt: new Date().toLocaleTimeString('id-ID'),
+      connectionMode,
     },
     isEmptySheet: false,
   };
 }
 
-export async function syncAllToGoogleSheets(
-  accessToken: string,
+/**
+ * Direct Zero-Auth Public Reader for Google Sheets.
+ * Works on ANY domain (including *.vercel.app, localhost, custom domains) WITHOUT requiring Google OAuth login!
+ */
+export async function fetchFromGoogleSheetsPublic(): Promise<{
+  payload: DatabasePayload;
+  meta: SheetMetadataInfo;
+  isEmptySheet: boolean;
+}> {
+  // Strategy 0: If Google Apps Script Web App Bridge URL is configured, try reading via doGet
+  const gasUrl = getSavedGasBridgeUrl();
+  if (gasUrl) {
+    try {
+      const gasRes = await fetch(
+        `${gasUrl}${gasUrl.includes('?') ? '&' : '?'}action=readAll&t=${Date.now()}`
+      );
+      if (gasRes.ok) {
+        const gasJson = await gasRes.json();
+        if (gasJson && gasJson.status === 'ok' && gasJson.sheets) {
+          const tabValuesMap: Record<string, string[][]> = {};
+          const tabs = Object.keys(gasJson.sheets);
+          tabs.forEach((tabName) => {
+            const rawRows = gasJson.sheets[tabName] || [];
+            tabValuesMap[tabName] = rawRows.map((r: any[]) =>
+              r.map((cell) => String(cell ?? '').trim())
+            );
+          });
+          const gid0Title = gasJson.gid0Title || tabs[0] || 'Sheet1';
+          const gid0Rows = tabValuesMap[gid0Title] || [];
+          return parseSheetTabsToDatabase(
+            tabValuesMap,
+            gid0Rows,
+            gasJson.spreadsheetTitle ||
+              'Database E-Raport STS SMKN 1 Mesuji Timur',
+            gid0Title,
+            tabs,
+            'gas_bridge'
+          );
+        }
+      }
+    } catch (err) {
+      console.warn('GAS Bridge read fallback to public XLSX export:', err);
+    }
+  }
+
+  // Strategy 1: Fetch full workbook via /export?format=xlsx (single request for all tabs!)
+  try {
+    const exportUrl = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/export?format=xlsx&t=${Date.now()}`;
+    const res = await fetch(exportUrl);
+    if (res.ok) {
+      const arrayBuf = await res.arrayBuffer();
+      const wb = XLSX.read(arrayBuf, { type: 'array' });
+      const tabs = wb.SheetNames || [];
+      const gid0Title = tabs[0] || 'Sheet1';
+      const tabValuesMap: Record<string, string[][]> = {};
+
+      tabs.forEach((tabName) => {
+        const sheet = wb.Sheets[tabName];
+        if (sheet) {
+          const rows = XLSX.utils.sheet_to_json<(string | number)[]>(sheet, {
+            header: 1,
+            defval: '',
+            raw: false,
+          });
+          tabValuesMap[tabName] = rows.map((r) =>
+            r.map((cell) => String(cell ?? '').trim())
+          );
+        }
+      });
+
+      const gid0Rows = tabValuesMap[gid0Title] || [];
+      return parseSheetTabsToDatabase(
+        tabValuesMap,
+        gid0Rows,
+        'Database E-Raport STS SMKN 1 Mesuji Timur',
+        gid0Title,
+        tabs,
+        'public_direct'
+      );
+    }
+  } catch (err) {
+    console.warn('Public XLSX export fallback to gviz CSV:', err);
+  }
+
+  // Strategy 2: Fetch each tab via /gviz/tq?tqx=out:csv
+  const tabValuesMap: Record<string, string[][]> = {};
+  const detectedTabs: string[] = [];
+
+  for (const tabName of ['Sheet1', ...REQUIRED_TABS]) {
+    try {
+      const csvUrl = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(
+        tabName
+      )}&t=${Date.now()}`;
+      const res = await fetch(csvUrl);
+      if (res.ok) {
+        const csvText = await res.text();
+        const wb = XLSX.read(csvText, { type: 'string' });
+        const firstSheet = wb.Sheets[wb.SheetNames[0]];
+        if (firstSheet) {
+          const rows = XLSX.utils.sheet_to_json<(string | number)[]>(
+            firstSheet,
+            {
+              header: 1,
+              defval: '',
+              raw: false,
+            }
+          );
+          tabValuesMap[tabName] = rows.map((r) =>
+            r.map((c) => String(c ?? '').trim())
+          );
+          detectedTabs.push(tabName);
+        }
+      }
+    } catch {
+      // Ignore individual tab fetch error
+    }
+  }
+
+  if (detectedTabs.length === 0) {
+    throw new Error(
+      'Tidak dapat menghubungi Google Spreadsheet. Pastikan koneksi internet aktif dan Spreadsheet disetel "Siapa saja yang memiliki link".'
+    );
+  }
+
+  const gid0Rows = tabValuesMap['Sheet1'] || [];
+  return parseSheetTabsToDatabase(
+    tabValuesMap,
+    gid0Rows,
+    'Database E-Raport STS SMKN 1 Mesuji Timur',
+    'Sheet1',
+    detectedTabs,
+    'public_direct'
+  );
+}
+
+export async function fetchFromGoogleSheets(
+  accessToken?: string | null
+): Promise<{
+  payload: DatabasePayload;
+  meta: SheetMetadataInfo;
+  isEmptySheet: boolean;
+}> {
+  if (!accessToken) {
+    return fetchFromGoogleSheetsPublic();
+  }
+
+  try {
+    // 1. Fetch spreadsheet metadata via OAuth
+    const metaRes = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    );
+
+    if (!metaRes.ok) {
+      return await fetchFromGoogleSheetsPublic();
+    }
+
+    const metaJson = await metaRes.json();
+    const spreadsheetTitle: string =
+      metaJson.properties?.title || 'Database E-Raport STS';
+    const sheetsList: Array<{ properties: { title: string; sheetId: number } }> =
+      metaJson.sheets || [];
+
+    const tabs = sheetsList.map((s) => s.properties.title);
+    const gid0Sheet =
+      sheetsList.find((s) => s.properties.sheetId === 0) || sheetsList[0];
+    const gid0Title = gid0Sheet ? gid0Sheet.properties.title : 'Sheet1';
+
+    // Build ranges to batchGet
+    const rangesToFetch: string[] = [`'${gid0Title}'!A1:Z300`];
+    REQUIRED_TABS.forEach((tab) => {
+      if (tabs.includes(tab)) {
+        rangesToFetch.push(`'${tab}'!A1:Z600`);
+      }
+    });
+
+    const params = rangesToFetch
+      .map((r) => `ranges=${encodeURIComponent(r)}`)
+      .join('&');
+    const valRes = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}/values:batchGet?${params}`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    );
+
+    if (!valRes.ok) {
+      return await fetchFromGoogleSheetsPublic();
+    }
+
+    const valJson = await valRes.json();
+    const valueRanges: Array<{ range: string; values?: string[][] }> =
+      valJson.valueRanges || [];
+
+    const gid0Rows: string[][] = valueRanges[0]?.values || [];
+
+    const tabValuesMap: Record<string, string[][]> = {};
+    let rangeIdx = 1;
+    REQUIRED_TABS.forEach((tab) => {
+      if (tabs.includes(tab)) {
+        tabValuesMap[tab] = valueRanges[rangeIdx]?.values || [];
+        rangeIdx++;
+      }
+    });
+
+    return parseSheetTabsToDatabase(
+      tabValuesMap,
+      gid0Rows,
+      spreadsheetTitle,
+      gid0Title,
+      tabs,
+      'oauth'
+    );
+  } catch {
+    return fetchFromGoogleSheetsPublic();
+  }
+}
+
+function buildSheetTabularValues(payload: DatabasePayload) {
+  const allSubjects = getAllSubjectNames();
+
+  const gid0Headers = [
+    'ID',
+    'NIS',
+    'NISN',
+    'Nama Siswa',
+    'Kelas',
+    'Tingkat',
+    'Konsentrasi Keahlian',
+    'Sakit',
+    'Izin',
+    'Alpa',
+    'Catatan Wali Kelas',
+    'Total Nilai',
+    'Rata-Rata',
+    ...allSubjects,
+  ];
+
+  const gid0Values: (string | number)[][] = [gid0Headers];
+  payload.students.forEach((st) => {
+    const gMap = payload.studentGrades[st.id] || {};
+    const numericScores = Object.values(gMap).filter(
+      (v): v is number => typeof v === 'number' && !Number.isNaN(v)
+    );
+    const total = numericScores.reduce((a, b) => a + b, 0);
+    const avg =
+      numericScores.length > 0
+        ? Number((total / numericScores.length).toFixed(2))
+        : 0;
+
+    gid0Values.push([
+      st.id,
+      st.nis,
+      st.nisn,
+      st.name,
+      st.className,
+      st.grade,
+      st.major,
+      st.attendance?.sakit || 0,
+      st.attendance?.izin || 0,
+      st.attendance?.alpa || 0,
+      st.note || '',
+      total,
+      avg,
+      ...allSubjects.map((sub) =>
+        gMap[sub] !== undefined && gMap[sub] !== null ? gMap[sub] : ''
+      ),
+    ]);
+  });
+
+  const savedGasUrl = getSavedGasBridgeUrl();
+  const sekolahValues: (string | number)[][] = [
+    ['Key', 'Value'],
+    ['name', payload.school.name],
+    ['npsn', payload.school.npsn],
+    ['logoUrl', payload.school.logoUrl || DEFAULT_SCHOOL.logoUrl],
+    ['kopUrl', payload.school.kopUrl],
+    ['principal', payload.school.principal],
+    ['principalNip', payload.school.principalNip],
+    ['tp', payload.school.tp],
+    ['datePrint', payload.school.datePrint],
+    ...(savedGasUrl ? [['gasBridgeUrl', savedGasUrl]] : []),
+  ];
+
+  const kelasValues: (string | number)[][] = [
+    [
+      'ID',
+      'Nama Rombel',
+      'Tingkat',
+      'Konsentrasi Keahlian',
+      'Wali Kelas',
+      'NIP Wali Kelas',
+    ],
+    ...payload.classes.map((c) => [
+      c.id,
+      c.name,
+      c.grade,
+      c.major,
+      c.waliKelasName,
+      c.waliKelasNip,
+    ]),
+  ];
+
+  const siswaValues: (string | number)[][] = [
+    [
+      'ID',
+      'NIS',
+      'NISN',
+      'Nama Lengkap',
+      'Kelas',
+      'Tingkat',
+      'Konsentrasi Keahlian',
+      'Sakit',
+      'Izin',
+      'Alpa',
+      'Catatan Wali Kelas',
+    ],
+    ...payload.students.map((s) => [
+      s.id,
+      s.nis,
+      s.nisn,
+      s.name,
+      s.className,
+      s.grade,
+      s.major,
+      s.attendance?.sakit || 0,
+      s.attendance?.izin || 0,
+      s.attendance?.alpa || 0,
+      s.note || '',
+    ]),
+  ];
+
+  const usersValues: (string | number)[][] = [
+    [
+      'ID',
+      'Username',
+      'Password',
+      'Nama Lengkap',
+      'NIP',
+      'Roles',
+      'Wali Kelas Untuk',
+    ],
+    ...payload.users.map((u) => [
+      u.id,
+      u.username,
+      u.password,
+      u.name,
+      u.nip || '',
+      u.roles.join(','),
+      u.waliKelasFor || '',
+    ]),
+  ];
+
+  const nilaiValues: (string | number)[][] = [
+    ['Student ID', 'Nama Siswa', 'Kelas', 'Mata Pelajaran', 'Nilai STS'],
+  ];
+  payload.students.forEach((s) => {
+    const gradesForStudent = payload.studentGrades[s.id] || {};
+    Object.entries(gradesForStudent).forEach(([subjectName, score]) => {
+      if (score !== undefined && score !== null && String(score) !== '') {
+        nilaiValues.push([s.id, s.name, s.className, subjectName, score]);
+      }
+    });
+  });
+
+  return {
+    gid0Values,
+    sekolahValues,
+    kelasValues,
+    siswaValues,
+    usersValues,
+    nilaiValues,
+  };
+}
+
+/**
+ * Writes all sheets via Google Apps Script Web App Bridge (Zero OAuth / Works on any Vercel domain for all roles)
+ */
+export async function syncViaGasWebApp(
+  gasUrl: string,
   payload: DatabasePayload
 ): Promise<SheetMetadataInfo> {
+  saveLocalDatabaseCache(payload);
+  const tables = buildSheetTabularValues(payload);
+
+  const res = await fetch(gasUrl.trim(), {
+    method: 'POST',
+    headers: {
+      // text/plain avoids CORS preflight OPTIONS failure on Google Apps Script Web Apps
+      'Content-Type': 'text/plain;charset=utf-8',
+    },
+    body: JSON.stringify({
+      action: 'syncAll',
+      spreadsheetId: SPREADSHEET_ID,
+      sheets: {
+        Sheet1: tables.gid0Values,
+        Sekolah: tables.sekolahValues,
+        Kelas: tables.kelasValues,
+        Siswa: tables.siswaValues,
+        Users: tables.usersValues,
+        Nilai: tables.nilaiValues,
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Gagal menghubungi Web App GAS (HTTP ${res.status})`);
+  }
+
+  return {
+    spreadsheetTitle: 'Database E-Raport STS SMKN 1 Mesuji Timur',
+    gid0Title: 'Sheet1',
+    tabs: ['Sheet1', ...REQUIRED_TABS],
+    gid0PreviewRows: tables.gid0Values.slice(0, 15).map((r) => r.map(String)),
+    hasStructuredTabs: true,
+    lastSyncedAt: new Date().toLocaleTimeString('id-ID'),
+    connectionMode: 'gas_bridge',
+  };
+}
+
+export async function syncAllToGoogleSheets(
+  accessToken: string | null | undefined,
+  payload: DatabasePayload
+): Promise<SheetMetadataInfo> {
+  saveLocalDatabaseCache(payload);
+  const gasUrl = getSavedGasBridgeUrl();
+
+  // If no OAuth token is present, use GAS Web App Bridge if configured
+  if (!accessToken && gasUrl) {
+    return syncViaGasWebApp(gasUrl, payload);
+  }
+
+  if (!accessToken) {
+    throw new Error(
+      'Token otorisasi Google belum tersedia. Silakan hubungkan Google atau pasang URL Web App Google Apps Script di tab Database.'
+    );
+  }
+
   // 1. Fetch current metadata to check existing sheet tabs
   const metaRes = await fetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}`,
@@ -414,6 +864,10 @@ export async function syncAllToGoogleSheets(
   );
 
   if (!metaRes.ok) {
+    // If OAuth token expired and GAS bridge is available, fall back to GAS bridge
+    if (gasUrl) {
+      return syncViaGasWebApp(gasUrl, payload);
+    }
     const errBody = await metaRes.json().catch(() => ({}));
     throw new Error(
       errBody?.error?.message || 'Gagal membaca metadata Google Sheet.'
@@ -473,134 +927,7 @@ export async function syncAllToGoogleSheets(
   );
 
   // 4. Prepare tabular data for all tabs + gid=0 Master Leger
-  const allSubjects = getAllSubjectNames();
-
-  const gid0Headers = [
-    'ID',
-    'NIS',
-    'NISN',
-    'Nama Siswa',
-    'Kelas',
-    'Tingkat',
-    'Konsentrasi Keahlian',
-    'Sakit',
-    'Izin',
-    'Alpa',
-    'Catatan Wali Kelas',
-    'Total Nilai',
-    'Rata-Rata',
-    ...allSubjects,
-  ];
-
-  const gid0Values: (string | number)[][] = [gid0Headers];
-  payload.students.forEach((st) => {
-    const gMap = payload.studentGrades[st.id] || {};
-    const numericScores = Object.values(gMap).filter(
-      (v): v is number => typeof v === 'number' && !Number.isNaN(v)
-    );
-    const total = numericScores.reduce((a, b) => a + b, 0);
-    const avg =
-      numericScores.length > 0
-        ? Number((total / numericScores.length).toFixed(2))
-        : 0;
-
-    gid0Values.push([
-      st.id,
-      st.nis,
-      st.nisn,
-      st.name,
-      st.className,
-      st.grade,
-      st.major,
-      st.attendance?.sakit || 0,
-      st.attendance?.izin || 0,
-      st.attendance?.alpa || 0,
-      st.note || '',
-      total,
-      avg,
-      ...allSubjects.map((sub) =>
-        gMap[sub] !== undefined && gMap[sub] !== null ? gMap[sub] : ''
-      ),
-    ]);
-  });
-
-  const sekolahValues: (string | number)[][] = [
-    ['Key', 'Value'],
-    ['name', payload.school.name],
-    ['npsn', payload.school.npsn],
-    ['logoUrl', payload.school.logoUrl || DEFAULT_SCHOOL.logoUrl],
-    ['kopUrl', payload.school.kopUrl],
-    ['principal', payload.school.principal],
-    ['principalNip', payload.school.principalNip],
-    ['tp', payload.school.tp],
-    ['datePrint', payload.school.datePrint],
-  ];
-
-  const kelasValues: (string | number)[][] = [
-    ['ID', 'Nama Rombel', 'Tingkat', 'Konsentrasi Keahlian', 'Wali Kelas', 'NIP Wali Kelas'],
-    ...payload.classes.map((c) => [
-      c.id,
-      c.name,
-      c.grade,
-      c.major,
-      c.waliKelasName,
-      c.waliKelasNip,
-    ]),
-  ];
-
-  const siswaValues: (string | number)[][] = [
-    [
-      'ID',
-      'NIS',
-      'NISN',
-      'Nama Lengkap',
-      'Kelas',
-      'Tingkat',
-      'Konsentrasi Keahlian',
-      'Sakit',
-      'Izin',
-      'Alpa',
-      'Catatan Wali Kelas',
-    ],
-    ...payload.students.map((s) => [
-      s.id,
-      s.nis,
-      s.nisn,
-      s.name,
-      s.className,
-      s.grade,
-      s.major,
-      s.attendance?.sakit || 0,
-      s.attendance?.izin || 0,
-      s.attendance?.alpa || 0,
-      s.note || '',
-    ]),
-  ];
-
-  const usersValues: (string | number)[][] = [
-    ['ID', 'Username', 'Password', 'Nama Lengkap', 'NIP', 'Roles', 'Wali Kelas Untuk'],
-    ...payload.users.map((u) => [
-      u.id,
-      u.username,
-      u.password,
-      u.name,
-      u.nip || '',
-      u.roles.join(','),
-      u.waliKelasFor || '',
-    ]),
-  ];
-
-  const nilaiValues: (string | number)[][] = [
-    ['Student ID', 'Nama Siswa', 'Kelas', 'Mata Pelajaran', 'Nilai STS'],
-  ];
-  payload.students.forEach((s) => {
-    const gradesForStudent = payload.studentGrades[s.id] || {};
-    Object.entries(gradesForStudent).forEach(([subjectName, score]) => {
-      if (score !== undefined && score !== null && String(score) !== '') {
-        nilaiValues.push([s.id, s.name, s.className, subjectName, score]);
-      }
-    });
-  });
+  const tables = buildSheetTabularValues(payload);
 
   // 5. Batch update values across all sheets
   const batchWriteRes = await fetch(
@@ -614,12 +941,12 @@ export async function syncAllToGoogleSheets(
       body: JSON.stringify({
         valueInputOption: 'USER_ENTERED',
         data: [
-          { range: `'${gid0Title}'!A1`, values: gid0Values },
-          { range: `'Sekolah'!A1`, values: sekolahValues },
-          { range: `'Kelas'!A1`, values: kelasValues },
-          { range: `'Siswa'!A1`, values: siswaValues },
-          { range: `'Users'!A1`, values: usersValues },
-          { range: `'Nilai'!A1`, values: nilaiValues },
+          { range: `'${gid0Title}'!A1`, values: tables.gid0Values },
+          { range: `'Sekolah'!A1`, values: tables.sekolahValues },
+          { range: `'Kelas'!A1`, values: tables.kelasValues },
+          { range: `'Siswa'!A1`, values: tables.siswaValues },
+          { range: `'Users'!A1`, values: tables.usersValues },
+          { range: `'Nilai'!A1`, values: tables.nilaiValues },
         ],
       }),
     }
@@ -638,8 +965,71 @@ export async function syncAllToGoogleSheets(
     spreadsheetTitle,
     gid0Title,
     tabs: finalTabs,
-    gid0PreviewRows: gid0Values.slice(0, 15).map((r) => r.map(String)),
+    gid0PreviewRows: tables.gid0Values.slice(0, 15).map((r) => r.map(String)),
     hasStructuredTabs: true,
     lastSyncedAt: new Date().toLocaleTimeString('id-ID'),
+    connectionMode: 'oauth',
   };
 }
+
+export function getGasBridgeScriptCode(): string {
+  return `// ============================================================================
+// GOOGLE APPS SCRIPT BRIDGE - E-RAPORT STS SMKN 1 MESUJI TIMUR
+// Pasang di Spreadsheet (Ekstensi -> Apps Script -> Terapkan -> Deployment Baru -> Aplikasi Web -> Akses: Siapa saja / Anyone)
+// Solusi agar aplikasi di Vercel dapat Membaca & Menyimpan ke Spreadsheet tanpa terkendala Login Google OAuth
+// ============================================================================
+const SPREADSHEET_ID = '${SPREADSHEET_ID}';
+
+function doGet(e) {
+  try {
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const sheets = ss.getSheets();
+    const resultSheets = {};
+    sheets.forEach(function(sh) {
+      resultSheets[sh.getName()] = sh.getDataRange().getDisplayValues();
+    });
+    return ContentService
+      .createTextOutput(JSON.stringify({
+        status: 'ok',
+        spreadsheetTitle: ss.getName(),
+        gid0Title: sheets[0] ? sheets[0].getName() : 'Sheet1',
+        sheets: resultSheets
+      }))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService
+      .createTextOutput(JSON.stringify({ status: 'error', message: String(err) }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+function doPost(e) {
+  try {
+    const body = JSON.parse(e.postData.contents);
+    const ss = SpreadsheetApp.openById(body.spreadsheetId || SPREADSHEET_ID);
+    const sheetsData = body.sheets || {};
+
+    Object.keys(sheetsData).forEach(function(sheetName) {
+      const rows = sheetsData[sheetName];
+      if (!Array.isArray(rows) || rows.length === 0) return;
+      let sheet = ss.getSheetByName(sheetName);
+      if (!sheet) {
+        sheet = ss.insertSheet(sheetName);
+      }
+      sheet.clearContents();
+      const numRows = rows.length;
+      const numCols = rows[0].length;
+      sheet.getRange(1, 1, numRows, numCols).setValues(rows);
+    });
+
+    return ContentService
+      .createTextOutput(JSON.stringify({ status: 'ok', updatedAt: new Date().toISOString() }))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService
+      .createTextOutput(JSON.stringify({ status: 'error', message: String(err) }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}`;
+}
+

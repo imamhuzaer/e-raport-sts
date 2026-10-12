@@ -19,13 +19,21 @@ import {
   UserAccount,
 } from './types';
 import {
+  FIREBASE_PROJECT_ID,
   getAccessToken,
+  GOOGLE_OAUTH_CLIENT_ID,
   googleSignIn,
   initAuth,
   logout as googleLogout,
 } from './services/firebaseAuth';
 import {
   fetchFromGoogleSheets,
+  fetchFromGoogleSheetsPublic,
+  getGasBridgeScriptCode,
+  getSavedGasBridgeUrl,
+  loadLocalDatabaseCache,
+  saveGasBridgeUrl,
+  saveLocalDatabaseCache,
   SheetMetadataInfo,
   syncAllToGoogleSheets,
 } from './services/sheetsDatabase';
@@ -73,12 +81,24 @@ export default function App() {
   const [activeRole, setActiveRole] = useState<RoleType>('admin');
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
 
-  // Google Workspace OAuth State (in-memory token via firebaseAuth service)
+  // Google Workspace OAuth & Vercel Bridge State
   const [needsGoogleAuth, setNeedsGoogleAuth] = useState(true);
   const [googleUser, setGoogleUser] = useState<User | null>(null);
   const [googleToken, setGoogleToken] = useState<string | null>(null);
   const [isSyncingSheets, setIsSyncingSheets] = useState(false);
   const [sheetMeta, setSheetMeta] = useState<SheetMetadataInfo | null>(null);
+  const [gasBridgeUrlInput, setGasBridgeUrlInput] = useState<string>(() =>
+    getSavedGasBridgeUrl()
+  );
+  const [customOAuthClientId, setCustomOAuthClientId] = useState<string>(() =>
+    typeof window !== 'undefined'
+      ? localStorage.getItem('eraport_custom_oauth_client_id') || ''
+      : ''
+  );
+  const [showGasScriptModal, setShowGasScriptModal] = useState(false);
+  const [vercelDomainError, setVercelDomainError] = useState<string | null>(
+    null
+  );
 
   // Core Application Database State
   const [school, setSchool] = useState<SchoolData>({ ...DEFAULT_SCHOOL });
@@ -186,13 +206,42 @@ export default function App() {
     }, 3500);
   };
 
-  // Initialize Firebase Auth Listener
+  // Initialize Firebase Auth Listener & Auto-Load Spreadsheet Database on Mount (Works on Vercel without OAuth!)
   useEffect(() => {
+    // 1. Hydrate from local cache first for instant startup
+    const cached = loadLocalDatabaseCache();
+    if (cached) {
+      setSchool(cached.school);
+      setClasses(cached.classes);
+      setStudents(cached.students);
+      setUsers(cached.users);
+      setStudentGrades(cached.studentGrades);
+    }
+
+    // 2. Automatically fetch live database from Google Spreadsheet (Zero-Auth Public / GAS Bridge)
+    fetchFromGoogleSheetsPublic()
+      .then((result) => {
+        if (!result.isEmptySheet) {
+          setSchool(result.payload.school);
+          setClasses(result.payload.classes);
+          setStudents(result.payload.students);
+          setUsers(result.payload.users);
+          setStudentGrades(result.payload.studentGrades);
+        }
+        setSheetMeta(result.meta);
+        const updatedGas = getSavedGasBridgeUrl();
+        if (updatedGas) setGasBridgeUrlInput(updatedGas);
+      })
+      .catch((err) => {
+        console.warn('Initial background sheet load notice:', err);
+      });
+
     const unsubscribe = initAuth(
       (user, token) => {
         setGoogleUser(user);
         setGoogleToken(token);
         setNeedsGoogleAuth(false);
+        setVercelDomainError(null);
       },
       () => {
         setGoogleUser(null);
@@ -203,7 +252,7 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Load data from Google Sheets (Admin Only)
+  // Load data from Google Sheets (Admin Only - Works WITH or WITHOUT Google OAuth Login!)
   const loadFromGoogleSheets = async (tokenOverride?: string) => {
     if (!currentUser?.roles.includes('admin') || activeRole !== 'admin') {
       showToast(
@@ -212,15 +261,8 @@ export default function App() {
       );
       return;
     }
-    const activeToken = tokenOverride || (await getAccessToken()) || googleToken;
-    if (!activeToken) {
-      setNeedsGoogleAuth(true);
-      showToast(
-        'Silakan masuk dengan akun Google terlebih dahulu untuk mengakses Google Sheets.',
-        'danger'
-      );
-      return;
-    }
+    const activeToken =
+      tokenOverride || (await getAccessToken()) || googleToken || null;
 
     setIsSyncingSheets(true);
     try {
@@ -231,15 +273,24 @@ export default function App() {
       setUsers(result.payload.users);
       setStudentGrades(result.payload.studentGrades);
       setSheetMeta(result.meta);
+      const updatedGas = getSavedGasBridgeUrl();
+      if (updatedGas) setGasBridgeUrlInput(updatedGas);
+
+      const modeLabel =
+        result.meta.connectionMode === 'oauth'
+          ? 'Google OAuth'
+          : result.meta.connectionMode === 'gas_bridge'
+          ? 'Bridge Apps Script'
+          : 'Koneksi Langsung Tanpa OAuth';
 
       if (result.isEmptySheet) {
         showToast(
-          'Spreadsheet terhubung (masih kosong). Klik "Sinkronkan ke Google Sheets" untuk menginisialisasi tabel.',
+          `Spreadsheet terhubung via ${modeLabel} (masih kosong). Klik "Tulis / Inisialisasi ke Spreadsheet" untuk mengisi tabel.`,
           'success'
         );
       } else {
         showToast(
-          `Data berhasil dimuat dari Google Sheet (${result.meta.spreadsheetTitle})!`,
+          `Data berhasil dimuat dari Google Sheet (${result.meta.spreadsheetTitle}) via ${modeLabel}!`,
           'success'
         );
       }
@@ -264,36 +315,63 @@ export default function App() {
       return;
     }
     setIsSyncingSheets(true);
+    setVercelDomainError(null);
     try {
-      const res = await googleSignIn();
+      const res = await googleSignIn(customOAuthClientId);
       if (res) {
         setGoogleUser(res.user);
         setGoogleToken(res.accessToken);
         setNeedsGoogleAuth(false);
+        setVercelDomainError(null);
         await loadFromGoogleSheets(res.accessToken);
       }
     } catch (error: any) {
       console.error('Google Sign-In failed:', error);
-      showToast(
-        'Gagal otorisasi Google Sheets. Pastikan popup tidak diblokir.',
-        'danger'
-      );
+      const host =
+        typeof window !== 'undefined' ? window.location.hostname : 'vercel.app';
+      const isDomainErr =
+        error?.code === 'auth/unauthorized-domain' ||
+        String(error?.message || '').includes('unauthorized-domain') ||
+        String(error?.message || '').includes('Authorized Domains');
+
+      if (isDomainErr) {
+        setVercelDomainError(host);
+        setAdminTab('database');
+        // Still load data from Spreadsheet automatically via Direct/Public mode!
+        await loadFromGoogleSheets(undefined);
+        showToast(
+          `Data Spreadsheet tetap berhasil dimuat secara langsung! Untuk login OAuth di domain "${host}", lihat panduan di tab Database.`,
+          'danger'
+        );
+      } else {
+        showToast(
+          error?.message ||
+            'Gagal otorisasi Google Sheets. Anda tetap dapat membaca data secara langsung di tab Database.',
+          'danger'
+        );
+      }
     } finally {
       setIsSyncingSheets(false);
     }
   };
 
-  // Execute confirmed mutation and sync to Google Sheets
+  // Execute confirmed mutation and sync to Google Sheets (via OAuth OR GAS Web App Bridge)
   const confirmAndExecuteMutation = async () => {
     if (!pendingMutation) return;
     const mutation = pendingMutation;
     setPendingMutation(null);
 
     const updatedPayload = mutation.executeLocalAndReturnPayload();
+    saveLocalDatabaseCache(updatedPayload);
 
     const activeToken = (await getAccessToken()) || googleToken;
-    if (!activeToken) {
-      showToast('Perubahan berhasil disimpan!', 'success');
+    const savedGasUrl = getSavedGasBridgeUrl();
+
+    if (!activeToken && !savedGasUrl) {
+      showToast(
+        'Perubahan tersimpan di perangkat ini! (Hubungkan Google OAuth atau pasang URL Bridge Apps Script di tab Database untuk menulis otomatis ke Spreadsheet).',
+        'success'
+      );
       return;
     }
 
@@ -305,7 +383,11 @@ export default function App() {
       );
       setSheetMeta(updatedMeta);
       showToast(
-        'Perubahan berhasil disimpan dan disinkronkan ke Google Sheets!',
+        `Perubahan berhasil disimpan dan disinkronkan ke Google Sheets (${
+          updatedMeta.connectionMode === 'gas_bridge'
+            ? 'via Apps Script Bridge'
+            : 'via Google OAuth'
+        })!`,
         'success'
       );
     } catch (error: any) {
@@ -2205,41 +2287,43 @@ export default function App() {
               {/* Right Controls: Google Sheets Sync (ADMIN ONLY) + Active User & Role Switcher */}
               <div className="flex flex-wrap items-center gap-2.5">
                 {activeRole === 'admin' &&
-                  currentUser?.roles.includes('admin') &&
-                  (needsGoogleAuth ? (
-                    <GoogleSignInButton
-                      onClick={handleGoogleConnect}
-                      disabled={isSyncingSheets}
-                    />
-                  ) : (
-                    <div className="flex items-center gap-1.5 bg-slate-800 px-2.5 py-1.5 rounded-lg border border-slate-700">
-                      <button
-                        type="button"
-                        onClick={() => loadFromGoogleSheets()}
-                        disabled={isSyncingSheets}
-                        className="text-xs font-semibold text-emerald-400 hover:text-emerald-300 flex items-center gap-1.5 px-1.5 cursor-pointer whitespace-nowrap"
-                        title="Muat data terbaru dari Google Sheets"
-                      >
-                        <i
-                          className={`fas fa-sync-alt ${
-                            isSyncingSheets ? 'fa-spin' : ''
-                          }`}
-                        ></i>
-                        <span>Muat Sheet</span>
-                      </button>
-                      <span className="text-slate-600">·</span>
-                      <button
-                        type="button"
-                        onClick={handleManualSyncToSheets}
-                        disabled={isSyncingSheets}
-                        className="text-xs font-semibold text-blue-400 hover:text-blue-300 flex items-center gap-1 px-1.5 cursor-pointer whitespace-nowrap"
-                        title="Simpan seluruh perubahan ke Google Sheets"
-                      >
-                        <i className="fas fa-cloud-upload-alt"></i>
-                        <span>Simpan ke Sheet</span>
-                      </button>
+                  currentUser?.roles.includes('admin') && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      {needsGoogleAuth && (
+                        <GoogleSignInButton
+                          onClick={handleGoogleConnect}
+                          disabled={isSyncingSheets}
+                        />
+                      )}
+                      <div className="flex items-center gap-1.5 bg-slate-800 px-2.5 py-1.5 rounded-lg border border-slate-700">
+                        <button
+                          type="button"
+                          onClick={() => loadFromGoogleSheets()}
+                          disabled={isSyncingSheets}
+                          className="text-xs font-semibold text-emerald-400 hover:text-emerald-300 flex items-center gap-1.5 px-1.5 cursor-pointer whitespace-nowrap"
+                          title="Baca data terbaru langsung dari Google Spreadsheet (Tanpa / Dengan OAuth)"
+                        >
+                          <i
+                            className={`fas fa-sync-alt ${
+                              isSyncingSheets ? 'fa-spin' : ''
+                            }`}
+                          ></i>
+                          <span>Muat Sheet</span>
+                        </button>
+                        <span className="text-slate-600">·</span>
+                        <button
+                          type="button"
+                          onClick={handleManualSyncToSheets}
+                          disabled={isSyncingSheets}
+                          className="text-xs font-semibold text-blue-400 hover:text-blue-300 flex items-center gap-1 px-1.5 cursor-pointer whitespace-nowrap"
+                          title="Simpan seluruh perubahan ke Google Spreadsheet"
+                        >
+                          <i className="fas fa-cloud-upload-alt"></i>
+                          <span>Simpan ke Sheet</span>
+                        </button>
+                      </div>
                     </div>
-                  ))}
+                  )}
 
                 <div className="bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700 flex items-center gap-2.5">
                   <div className="text-right hidden sm:block">
@@ -4383,46 +4467,84 @@ export default function App() {
                             disabled={isSyncingSheets}
                           />
                         ) : (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => loadFromGoogleSheets()}
-                              disabled={isSyncingSheets}
-                              className="px-3.5 py-2 bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold rounded-lg cursor-pointer"
-                            >
-                              <i
-                                className={`fas fa-sync-alt mr-1.5 ${
-                                  isSyncingSheets ? 'fa-spin' : ''
-                                }`}
-                              ></i>
-                              Baca Data dari Spreadsheet
-                            </button>
-                            <button
-                              type="button"
-                              onClick={handleManualSyncToSheets}
-                              disabled={isSyncingSheets}
-                              className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg cursor-pointer"
-                            >
-                              <i className="fas fa-cloud-upload-alt mr-1.5"></i>
-                              Tulis / Inisialisasi ke Spreadsheet
-                            </button>
-                          </>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              await googleLogout();
+                              setGoogleUser(null);
+                              setGoogleToken(null);
+                              setNeedsGoogleAuth(true);
+                              showToast(
+                                'Sesi Google OAuth telah diputuskan.',
+                                'success'
+                              );
+                            }}
+                            className="px-3 py-2 border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-bold rounded-lg cursor-pointer"
+                          >
+                            <i className="fas fa-unlink mr-1.5"></i>
+                            Putuskan OAuth
+                          </button>
                         )}
+                        <button
+                          type="button"
+                          onClick={() => loadFromGoogleSheets()}
+                          disabled={isSyncingSheets}
+                          className="px-3.5 py-2 bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold rounded-lg cursor-pointer"
+                        >
+                          <i
+                            className={`fas fa-sync-alt mr-1.5 ${
+                              isSyncingSheets ? 'fa-spin' : ''
+                            }`}
+                          ></i>
+                          Baca Data dari Spreadsheet
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleManualSyncToSheets}
+                          disabled={isSyncingSheets}
+                          className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg cursor-pointer"
+                        >
+                          <i className="fas fa-cloud-upload-alt mr-1.5"></i>
+                          Tulis / Inisialisasi ke Spreadsheet
+                        </button>
                       </div>
                     </div>
 
+                    {/* VERCEL DOMAIN & CONNECTION MODE STATUS CARDS */}
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                       <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
                         <div className="text-xs text-slate-500 mb-1">
-                          Status Otorisasi Google
+                          Mode Koneksi Database Aktif
                         </div>
-                        <div className="font-bold text-sm text-slate-900">
-                          {needsGoogleAuth
-                            ? 'Belum Terhubung'
-                            : googleUser?.email || 'Terhubung'}
+                        <div className="font-bold text-sm text-slate-900 flex items-center gap-1.5">
+                          {!needsGoogleAuth ? (
+                            <>
+                              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block"></span>
+                              <span>
+                                Google OAuth ({googleUser?.email || 'Aktif'})
+                              </span>
+                            </>
+                          ) : getSavedGasBridgeUrl() ? (
+                            <>
+                              <span className="w-2.5 h-2.5 rounded-full bg-blue-500 inline-block"></span>
+                              <span>
+                                Bridge Apps Script (Baca & Tulis Tanpa OAuth)
+                              </span>
+                            </>
+                          ) : (
+                            <>
+                              <span className="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block"></span>
+                              <span>
+                                Koneksi Langsung (Baca Otomatis Tanpa Login)
+                              </span>
+                            </>
+                          )}
                         </div>
                         <div className="text-xs text-slate-500 mt-1 font-mono">
-                          ID: {SPREADSHEET_ID.slice(0, 22)}...
+                          Domain:{' '}
+                          {typeof window !== 'undefined'
+                            ? window.location.hostname
+                            : '-'}
                         </div>
                       </div>
 
@@ -4451,6 +4573,249 @@ export default function App() {
                         </div>
                         <div className="text-xs text-slate-500 mt-1">
                           Sheet Utama (gid=0): {sheetMeta?.gid0Title || 'Sheet1'}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* VERCEL DEPLOYMENT & GOOGLE LOGIN FIX PANEL */}
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 pt-2">
+                      {/* SOLUTION 1: GOOGLE APPS SCRIPT WEB APP BRIDGE (ZERO OAUTH ON VERCEL) */}
+                      <div className="p-5 rounded-xl bg-blue-50/70 border border-blue-200 space-y-3">
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <span className="inline-block px-2 py-0.5 rounded bg-blue-600 text-white text-[10px] font-bold uppercase tracking-wide mb-1">
+                              Solusi 1 · Paling Stabil untuk Vercel (Tanpa Login Google)
+                            </span>
+                            <h6 className="font-bold text-sm text-slate-900">
+                              <i className="fas fa-bolt text-blue-600 mr-1.5"></i>
+                              Bridge Web App Google Apps Script (Baca & Simpan Otomatis)
+                            </h6>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setShowGasScriptModal(!showGasScriptModal)
+                            }
+                            className="px-2.5 py-1.5 bg-white hover:bg-blue-100 text-blue-700 border border-blue-300 rounded-lg text-xs font-bold cursor-pointer whitespace-nowrap"
+                          >
+                            <i className="fas fa-code mr-1"></i>
+                            {showGasScriptModal
+                              ? 'Sembunyikan Kode'
+                              : 'Lihat & Salin Kode Script'}
+                          </button>
+                        </div>
+
+                        <p className="text-xs text-slate-600 leading-relaxed">
+                          Saat di-deploy ke <b>Vercel</b>, Anda dapat menyimpan &
+                          membaca database Spreadsheet secara langsung{' '}
+                          <b>tanpa perlu tombol Sign in with Google</b> (bebas
+                          kendala blokir domain OAuth) dengan menempelkan URL
+                          Web App dari menu{' '}
+                          <b>Ekstensi &rarr; Apps Script</b> di Spreadsheet Anda.
+                        </p>
+
+                        {showGasScriptModal && (
+                          <div className="p-3 rounded-lg bg-slate-900 text-slate-100 text-[11px] font-mono space-y-2">
+                            <div className="flex items-center justify-between border-b border-slate-700 pb-2">
+                              <span className="text-amber-300 font-sans font-bold text-xs">
+                                Langkah Pasang di Spreadsheet (Hanya 1 Kali):
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  navigator.clipboard.writeText(
+                                    getGasBridgeScriptCode()
+                                  );
+                                  showToast(
+                                    'Kode Google Apps Script berhasil disalin!',
+                                    'success'
+                                  );
+                                }}
+                                className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-sans font-bold cursor-pointer"
+                              >
+                                <i className="fas fa-copy mr-1"></i> Salin Kode
+                              </button>
+                            </div>
+                            <ol className="list-decimal list-inside font-sans text-xs text-slate-300 space-y-1">
+                              <li>
+                                Buka Spreadsheet Anda &rarr; klik menu{' '}
+                                <b>Ekstensi &rarr; Apps Script</b>.
+                              </li>
+                              <li>
+                                Hapus kode yang ada, tempelkan kode di bawah ini,
+                                lalu klik ikon <b>Simpan</b>.
+                              </li>
+                              <li>
+                                Klik tombol{' '}
+                                <b>Terapkan (Deploy) &rarr; Deployment baru</b>{' '}
+                                &rarr; Pilih jenis <b>Aplikasi Web (Web App)</b>.
+                              </li>
+                              <li>
+                                Pada bagian <i>Siapa yang memiliki akses</i>,
+                                pilih <b>Siapa saja (Anyone)</b> &rarr; klik{' '}
+                                <b>Terapkan</b> &rarr; Salin <b>URL Aplikasi Web</b>.
+                              </li>
+                            </ol>
+                            <pre className="overflow-x-auto max-h-48 p-2.5 bg-slate-950 rounded border border-slate-800 text-[10px] leading-relaxed">
+                              {getGasBridgeScriptCode()}
+                            </pre>
+                          </div>
+                        )}
+
+                        <div className="space-y-2">
+                          <label className="block text-xs font-bold text-slate-700">
+                            URL Web App Google Apps Script (
+                            <span className="font-mono text-[11px] text-slate-500">
+                              https://script.google.com/macros/s/.../exec
+                            </span>
+                            )
+                          </label>
+                          <div className="flex flex-wrap sm:flex-nowrap gap-2">
+                            <input
+                              type="url"
+                              value={gasBridgeUrlInput}
+                              onChange={(e) =>
+                                setGasBridgeUrlInput(e.target.value)
+                              }
+                              placeholder="Tempelkan URL Web App Google Apps Script di sini..."
+                              className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-mono outline-none focus:border-blue-600"
+                            />
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                saveGasBridgeUrl(gasBridgeUrlInput);
+                                if (gasBridgeUrlInput.trim()) {
+                                  showToast(
+                                    'URL Bridge Apps Script disimpan! Menguji koneksi ke Spreadsheet...',
+                                    'success'
+                                  );
+                                  await loadFromGoogleSheets();
+                                } else {
+                                  showToast(
+                                    'URL Bridge Apps Script dikosongkan.',
+                                    'success'
+                                  );
+                                }
+                              }}
+                              disabled={isSyncingSheets}
+                              className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg cursor-pointer whitespace-nowrap"
+                            >
+                              <i className="fas fa-save mr-1.5"></i> Simpan &
+                              Uji Bridge
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* SOLUTION 2: AUTHORIZE VERCEL DOMAIN IN FIREBASE / GOOGLE CLOUD CONSOLE */}
+                      <div
+                        className={`p-5 rounded-xl border space-y-3 ${
+                          vercelDomainError
+                            ? 'bg-amber-50 border-amber-400 ring-2 ring-amber-300'
+                            : 'bg-slate-50 border-slate-200'
+                        }`}
+                      >
+                        <div>
+                          <span className="inline-block px-2 py-0.5 rounded bg-amber-600 text-white text-[10px] font-bold uppercase tracking-wide mb-1">
+                            Solusi 2 · Mengaktifkan Popup Login Google di Domain Vercel
+                          </span>
+                          <h6 className="font-bold text-sm text-slate-900">
+                            <i className="fas fa-shield-alt text-amber-600 mr-1.5"></i>
+                            Otorisasi Domain Vercel pada Firebase & Google Cloud
+                          </h6>
+                        </div>
+
+                        <p className="text-xs text-slate-600 leading-relaxed">
+                          Mengapa tombol <b>Sign in with Google</b> gagal saat
+                          di-deploy ke Vercel? Karena Google / Firebase memblokir
+                          popup login dari domain baru yang belum didaftarkan di{' '}
+                          <b>Authorized Domains</b>. Salin domain Vercel Anda di
+                          bawah ini lalu tambahkan ke Firebase Console:
+                        </p>
+
+                        <div className="p-3 bg-white rounded-lg border border-slate-200 flex items-center justify-between gap-2">
+                          <div>
+                            <div className="text-[10px] uppercase font-bold text-slate-400">
+                              Domain Aplikasi Saat Ini (Hostname):
+                            </div>
+                            <div className="font-mono font-bold text-xs text-slate-900">
+                              {typeof window !== 'undefined'
+                                ? window.location.hostname
+                                : 'nama-aplikasi.vercel.app'}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const host =
+                                typeof window !== 'undefined'
+                                  ? window.location.hostname
+                                  : '';
+                              navigator.clipboard.writeText(host);
+                              showToast(
+                                `Domain "${host}" berhasil disalin! Tempelkan di Authorized Domains Firebase Console.`,
+                                'success'
+                              );
+                            }}
+                            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold rounded-lg cursor-pointer whitespace-nowrap"
+                          >
+                            <i className="fas fa-copy mr-1.5"></i> Salin Domain
+                          </button>
+                        </div>
+
+                        <div className="flex flex-wrap gap-2">
+                          <a
+                            href={`https://console.firebase.google.com/project/${FIREBASE_PROJECT_ID}/authentication/settings`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-lg inline-flex items-center gap-1.5"
+                          >
+                            <i className="fas fa-external-link-alt"></i>
+                            1. Buka Firebase Authorized Domains
+                          </a>
+                          <a
+                            href={`https://console.cloud.google.com/apis/credentials?project=${FIREBASE_PROJECT_ID}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="px-3 py-2 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 text-xs font-bold rounded-lg inline-flex items-center gap-1.5"
+                          >
+                            <i className="fas fa-key"></i>
+                            2. Buka GCP OAuth Credentials
+                          </a>
+                        </div>
+
+                        <div className="pt-1 border-t border-slate-200/80 space-y-1.5">
+                          <label className="block text-[11px] font-bold text-slate-600">
+                            Opsional: Gunakan Google OAuth Client ID Milik Sendiri
+                            (Jika membuat project GCP sendiri untuk Vercel)
+                          </label>
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={customOAuthClientId}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setCustomOAuthClientId(val);
+                                if (typeof window !== 'undefined') {
+                                  if (val.trim()) {
+                                    localStorage.setItem(
+                                      'eraport_custom_oauth_client_id',
+                                      val.trim()
+                                    );
+                                  } else {
+                                    localStorage.removeItem(
+                                      'eraport_custom_oauth_client_id'
+                                    );
+                                  }
+                                }
+                              }}
+                              placeholder={`Default: ${GOOGLE_OAUTH_CLIENT_ID.slice(
+                                0,
+                                28
+                              )}...`}
+                              className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono outline-none focus:border-blue-600"
+                            />
+                          </div>
                         </div>
                       </div>
                     </div>
