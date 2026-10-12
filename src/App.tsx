@@ -80,13 +80,81 @@ type BulkImportType =
   | 'nilai'
   | 'nilai_admin_semua_mapel';
 
+type AdminTabType =
+  | 'statistik'
+  | 'nilai'
+  | 'sekolah'
+  | 'kelas'
+  | 'siswa'
+  | 'guru'
+  | 'users'
+  | 'database';
+
+interface SavedAuthSession {
+  isLoggedIn: boolean;
+  showRoleModal: boolean;
+  currentUser: UserAccount | null;
+  activeRole: RoleType;
+  adminTab?: AdminTabType;
+  waliSelectedClass?: string;
+  guruSelectedClass?: string;
+  guruSelectedSubject?: string;
+}
+
+const LOCAL_AUTH_SESSION_KEY = 'eraport_saved_login_session_v1';
+
+function loadSavedAuthSession(): SavedAuthSession | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(LOCAL_AUTH_SESSION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as SavedAuthSession;
+    if (parsed && parsed.currentUser && parsed.currentUser.username) {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function saveAuthSessionToLocal(session: SavedAuthSession | null): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (!session || !session.currentUser) {
+      localStorage.removeItem(LOCAL_AUTH_SESSION_KEY);
+    } else {
+      localStorage.setItem(LOCAL_AUTH_SESSION_KEY, JSON.stringify(session));
+    }
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
 export default function App() {
-  // Authentication & Role State
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [showRoleModal, setShowRoleModal] = useState(false);
-  const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
-  const [activeRole, setActiveRole] = useState<RoleType>('admin');
+  const initialSession = useMemo(() => loadSavedAuthSession(), []);
+
+  // Authentication & Role State (Hydrated from Local Browser Storage so Refresh Doesn't Logout)
+  const [isLoggedIn, setIsLoggedIn] = useState<boolean>(
+    () => initialSession?.isLoggedIn ?? false
+  );
+  const [showRoleModal, setShowRoleModal] = useState<boolean>(
+    () => initialSession?.showRoleModal ?? false
+  );
+  const [currentUser, setCurrentUser] = useState<UserAccount | null>(
+    () => initialSession?.currentUser ?? null
+  );
+  const [activeRole, setActiveRole] = useState<RoleType>(
+    () => initialSession?.activeRole ?? 'admin'
+  );
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
+  const [rememberLogin, setRememberLogin] = useState<boolean>(true);
+  const [showLoginPassword, setShowLoginPassword] = useState<boolean>(false);
+  const [showNewUserPassword, setShowNewUserPassword] =
+    useState<boolean>(false);
+  const [visibleUserPasswords, setVisibleUserPasswords] = useState<
+    Record<number, boolean>
+  >({});
 
   // Google Workspace OAuth & Vercel Bridge State
   const [needsGoogleAuth, setNeedsGoogleAuth] = useState(true);
@@ -131,16 +199,9 @@ export default function App() {
   const [subjectTemplates] = useState(DEFAULT_SUBJECT_TEMPLATES);
 
   // UI & Modal States
-  const [adminTab, setAdminTab] = useState<
-    | 'statistik'
-    | 'nilai'
-    | 'sekolah'
-    | 'kelas'
-    | 'siswa'
-    | 'guru'
-    | 'users'
-    | 'database'
-  >('statistik');
+  const [adminTab, setAdminTab] = useState<AdminTabType>(
+    () => initialSession?.adminTab ?? 'statistik'
+  );
   const [adminStatFilterClass, setAdminStatFilterClass] = useState('');
   const [adminTop10FilterClass, setAdminTop10FilterClass] = useState('');
   const [adminGradeSelectedClass, setAdminGradeSelectedClass] =
@@ -207,11 +268,17 @@ export default function App() {
   const [bulkReplaceExisting, setBulkReplaceExisting] = useState(false);
 
   const [adminStudentFilterClass, setAdminStudentFilterClass] = useState('');
-  const [guruSelectedClass, setGuruSelectedClass] = useState('10 TKR 1');
-  const [guruSelectedSubject, setGuruSelectedSubject] = useState(
-    'Pendidikan Agama dan Budi Pekerti'
+  const [guruSelectedClass, setGuruSelectedClass] = useState(
+    () => initialSession?.guruSelectedClass || '10 TKR 1'
   );
-  const [waliSelectedClass, setWaliSelectedClass] = useState('10 TKR 1');
+  const [guruSelectedSubject, setGuruSelectedSubject] = useState(
+    () =>
+      initialSession?.guruSelectedSubject ||
+      'Pendidikan Agama dan Budi Pekerti'
+  );
+  const [waliSelectedClass, setWaliSelectedClass] = useState(
+    () => initialSession?.waliSelectedClass || '10 TKR 1'
+  );
 
   // Print & PDF Download Modal State
   const [showPrintModal, setShowPrintModal] = useState(false);
@@ -603,10 +670,54 @@ export default function App() {
     }));
   }, [currentClassStudents, studentGrades]);
 
+  // Sync currentUser with latest users list when database loads, and persist session in localStorage
+  useEffect(() => {
+    if (!currentUser) return;
+    const updatedMatch = users.find(
+      (u) =>
+        u.username.trim().toLowerCase() ===
+          currentUser.username.trim().toLowerCase() || u.id === currentUser.id
+    );
+    if (
+      updatedMatch &&
+      JSON.stringify(updatedMatch) !== JSON.stringify(currentUser)
+    ) {
+      setCurrentUser(updatedMatch);
+    }
+  }, [users, currentUser]);
+
+  useEffect(() => {
+    if ((isLoggedIn || showRoleModal) && currentUser) {
+      if (rememberLogin) {
+        saveAuthSessionToLocal({
+          isLoggedIn,
+          showRoleModal,
+          currentUser,
+          activeRole,
+          adminTab,
+          waliSelectedClass,
+          guruSelectedClass,
+          guruSelectedSubject,
+        });
+      }
+    }
+  }, [
+    isLoggedIn,
+    showRoleModal,
+    currentUser,
+    activeRole,
+    adminTab,
+    waliSelectedClass,
+    guruSelectedClass,
+    guruSelectedSubject,
+    rememberLogin,
+  ]);
+
   // Authentication Handlers
   const performLoginWithUser = (user: UserAccount) => {
     setCurrentUser(user);
     setLoginForm({ username: '', password: '' });
+    setShowLoginPassword(false);
 
     const lockedCls = resolveLockedWaliClassForUser(user, classes);
     if (lockedCls) {
@@ -615,9 +726,38 @@ export default function App() {
 
     if (user.roles.length > 1) {
       setShowRoleModal(true);
+      if (rememberLogin) {
+        saveAuthSessionToLocal({
+          isLoggedIn: false,
+          showRoleModal: true,
+          currentUser: user,
+          activeRole: user.roles[0],
+          adminTab,
+          waliSelectedClass: lockedCls || waliSelectedClass,
+          guruSelectedClass,
+          guruSelectedSubject,
+        });
+      } else {
+        saveAuthSessionToLocal(null);
+      }
     } else {
-      setActiveRole(user.roles[0]);
+      const nextRole = user.roles[0];
+      setActiveRole(nextRole);
       setIsLoggedIn(true);
+      if (rememberLogin) {
+        saveAuthSessionToLocal({
+          isLoggedIn: true,
+          showRoleModal: false,
+          currentUser: user,
+          activeRole: nextRole,
+          adminTab,
+          waliSelectedClass: lockedCls || waliSelectedClass,
+          guruSelectedClass,
+          guruSelectedSubject,
+        });
+      } else {
+        saveAuthSessionToLocal(null);
+      }
       showToast(
         `Selamat datang, ${formatTeacherNameWithTitle(user.name)}!`,
         'success'
@@ -640,15 +780,29 @@ export default function App() {
   };
 
   const selectRole = (role: RoleType) => {
+    let nextWaliCls = waliSelectedClass;
     if (role === 'walikelas' && currentUser) {
       const lockedCls = resolveLockedWaliClassForUser(currentUser, classes);
       if (lockedCls) {
+        nextWaliCls = lockedCls;
         setWaliSelectedClass(lockedCls);
       }
     }
     setActiveRole(role);
     setShowRoleModal(false);
     setIsLoggedIn(true);
+    if (rememberLogin && currentUser) {
+      saveAuthSessionToLocal({
+        isLoggedIn: true,
+        showRoleModal: false,
+        currentUser,
+        activeRole: role,
+        adminTab,
+        waliSelectedClass: nextWaliCls,
+        guruSelectedClass,
+        guruSelectedSubject,
+      });
+    }
     const roleLabel =
       role === 'walikelas'
         ? 'Wali Kelas'
@@ -659,9 +813,11 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    saveAuthSessionToLocal(null);
     setIsLoggedIn(false);
     setShowRoleModal(false);
     setCurrentUser(null);
+    setShowLoginPassword(false);
     showToast('Anda telah keluar dari aplikasi.', 'success');
   };
 
@@ -2364,7 +2520,7 @@ export default function App() {
                         <i className="fas fa-lock"></i>
                       </span>
                       <input
-                        type="password"
+                        type={showLoginPassword ? 'text' : 'password'}
                         value={loginForm.password}
                         onChange={(e) =>
                           setLoginForm((prev) => ({
@@ -2372,11 +2528,51 @@ export default function App() {
                             password: e.target.value,
                           }))
                         }
-                        className="w-full py-2.5 pr-3 bg-transparent text-sm outline-none"
+                        className="w-full py-2.5 pr-2 bg-transparent text-sm outline-none"
                         placeholder="Masukkan password"
                         required
                       />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setShowLoginPassword((prev) => !prev)
+                        }
+                        title={
+                          showLoginPassword
+                            ? 'Sembunyikan Kata Sandi'
+                            : 'Lihat Kata Sandi'
+                        }
+                        aria-label={
+                          showLoginPassword
+                            ? 'Sembunyikan Kata Sandi'
+                            : 'Lihat Kata Sandi'
+                        }
+                        className="px-3 py-2 text-slate-400 hover:text-slate-700 transition-colors cursor-pointer"
+                      >
+                        <i
+                          className={
+                            showLoginPassword
+                              ? 'fas fa-eye-slash'
+                              : 'fas fa-eye'
+                          }
+                        ></i>
+                      </button>
                     </div>
+                  </div>
+
+                  <div className="flex items-center justify-between pt-0.5">
+                    <label className="flex items-center gap-2 text-xs text-slate-600 font-medium cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={rememberLogin}
+                        onChange={(e) => setRememberLogin(e.target.checked)}
+                        className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                      />
+                      <span>
+                        Simpan login di browser ini (Tidak login ulang saat
+                        refresh)
+                      </span>
+                    </label>
                   </div>
 
                   <button
@@ -4893,6 +5089,7 @@ export default function App() {
                               Nama Lengkap & NIP/NUPTK
                             </th>
                             <th className="py-3 px-4">Username</th>
+                            <th className="py-3 px-4">Kata Sandi</th>
                             <th className="py-3 px-4">Role Akses</th>
                             <th className="py-3 px-4">Wali Kelas Untuk</th>
                             <th className="py-3 px-4 text-right">Aksi</th>
@@ -4913,6 +5110,38 @@ export default function App() {
                               </td>
                               <td className="py-3 px-4 font-mono text-xs font-semibold text-slate-800">
                                 {u.username}
+                              </td>
+                              <td className="py-3 px-4 font-mono text-xs text-slate-700">
+                                <div className="inline-flex items-center gap-1.5 bg-slate-100 px-2 py-1 rounded border border-slate-200">
+                                  <span>
+                                    {visibleUserPasswords[u.id]
+                                      ? u.password
+                                      : '••••••'}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setVisibleUserPasswords((prev) => ({
+                                        ...prev,
+                                        [u.id]: !prev[u.id],
+                                      }))
+                                    }
+                                    title={
+                                      visibleUserPasswords[u.id]
+                                        ? 'Sembunyikan Password'
+                                        : 'Lihat Password'
+                                    }
+                                    className="text-slate-400 hover:text-slate-700 cursor-pointer"
+                                  >
+                                    <i
+                                      className={
+                                        visibleUserPasswords[u.id]
+                                          ? 'fas fa-eye-slash'
+                                          : 'fas fa-eye'
+                                      }
+                                    ></i>
+                                  </button>
+                                </div>
                               </td>
                               <td className="py-3 px-4 text-xs font-semibold text-slate-700">
                                 {u.roles
@@ -6565,15 +6794,37 @@ export default function App() {
                       <label className="block text-xs font-bold text-slate-700 mb-1">
                         Kata Sandi
                       </label>
-                      <input
-                        type="text"
-                        value={newUser.password}
-                        onChange={(e) =>
-                          setNewUser({ ...newUser, password: e.target.value })
-                        }
-                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono"
-                        placeholder="123456"
-                      />
+                      <div className="flex items-center border border-slate-300 rounded-lg overflow-hidden focus-within:border-blue-600">
+                        <input
+                          type={showNewUserPassword ? 'text' : 'password'}
+                          value={newUser.password}
+                          onChange={(e) =>
+                            setNewUser({ ...newUser, password: e.target.value })
+                          }
+                          className="w-full px-3 py-2 text-sm font-mono outline-none"
+                          placeholder="123456"
+                        />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setShowNewUserPassword((prev) => !prev)
+                          }
+                          title={
+                            showNewUserPassword
+                              ? 'Sembunyikan Kata Sandi'
+                              : 'Lihat Kata Sandi'
+                          }
+                          className="px-2.5 py-2 text-slate-400 hover:text-slate-700 cursor-pointer"
+                        >
+                          <i
+                            className={
+                              showNewUserPassword
+                                ? 'fas fa-eye-slash'
+                                : 'fas fa-eye'
+                            }
+                          ></i>
+                        </button>
+                      </div>
                     </div>
                   </div>
                   <div>

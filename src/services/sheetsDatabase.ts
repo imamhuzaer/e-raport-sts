@@ -616,10 +616,14 @@ function parseSheetTabsToDatabase(
         const rowClass =
           idxClass !== -1 ? String(r[idxClass] || '').trim().toLowerCase() : '';
 
-        const targetStId =
-          (rowName && rowClass && byNameAndClass.get(`${rowName}|${rowClass}`)) ||
-          (rowNisn && byNisn.get(rowNisn)) ||
-          (rowName && byNameOnly.get(rowName));
+        let targetStId: number | undefined;
+        if (rowName && rowClass && byNameAndClass.has(`${rowName}|${rowClass}`)) {
+          targetStId = byNameAndClass.get(`${rowName}|${rowClass}`);
+        } else if (rowNisn && byNisn.has(rowNisn)) {
+          targetStId = byNisn.get(rowNisn);
+        } else if (rowName && byNameOnly.has(rowName)) {
+          targetStId = byNameOnly.get(rowName);
+        }
 
         if (targetStId !== undefined) {
           if (!studentGrades[targetStId]) studentGrades[targetStId] = {};
