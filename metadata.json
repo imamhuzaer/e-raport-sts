@@ -1,0 +1,6 @@
+{
+  "name": "Sistem Raport STS SMKN 1 Mesuji Timur",
+  "description": "Sistem Laporan Hasil Belajar Sumatif Tengah Semester Kurikulum Merdeka SMKN 1 Mesuji Timur.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
