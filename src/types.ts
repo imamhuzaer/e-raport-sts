@@ -1,5 +1,7 @@
 export type RoleType = 'admin' | 'walikelas' | 'gurumapel';
 
+export type SignatureDisplayType = 'none' | 'signature' | 'qrcode';
+
 export interface UserAccount {
   id: number;
   username: string;
@@ -8,6 +10,8 @@ export interface UserAccount {
   nip: string;
   roles: RoleType[];
   waliKelasFor: string;
+  waliSignatureType?: SignatureDisplayType;
+  waliSignatureUrl?: string;
 }
 
 export interface SchoolData {
@@ -19,6 +23,8 @@ export interface SchoolData {
   principalNip: string;
   tp: string;
   datePrint: string;
+  principalSignatureType?: SignatureDisplayType;
+  principalSignatureUrl?: string;
 }
 
 export interface ClassItem {
@@ -28,6 +34,8 @@ export interface ClassItem {
   major: string;
   waliKelasName: string;
   waliKelasNip: string;
+  waliSignatureType?: SignatureDisplayType;
+  waliSignatureUrl?: string;
 }
 
 export interface SubjectItem {
@@ -88,12 +96,14 @@ export const DEFAULT_SCHOOL: SchoolData = {
   principalNip: '19740728 200902 2 003',
   tp: '2026/2027',
   datePrint: 'Mesuji Timur, Oktober 2026',
+  principalSignatureType: 'none',
+  principalSignatureUrl: '',
 };
 
 export const DEFAULT_CLASSES: ClassItem[] = [
-  { id: 1, name: '10 TKR 1', grade: '10', major: 'Teknik Kendaraan Ringan', waliKelasName: 'Budi Santoso, S.Pd.', waliKelasNip: '198503122010011002' },
-  { id: 2, name: '11 TKR 1', grade: '11', major: 'Teknik Kendaraan Ringan', waliKelasName: 'Siti Aminah, M.Pd.', waliKelasNip: '198807202012022005' },
-  { id: 3, name: '12 TKR 1', grade: '12', major: 'Teknik Kendaraan Ringan', waliKelasName: 'Ahmad Dahlan, S.T.', waliKelasNip: '198211052008011004' },
+  { id: 1, name: '10 TKR 1', grade: '10', major: 'Teknik Kendaraan Ringan', waliKelasName: 'Budi Santoso, S.Pd.', waliKelasNip: '198503122010011002', waliSignatureType: 'none', waliSignatureUrl: '' },
+  { id: 2, name: '11 TKR 1', grade: '11', major: 'Teknik Kendaraan Ringan', waliKelasName: 'Siti Aminah, M.Pd.', waliKelasNip: '198807202012022005', waliSignatureType: 'none', waliSignatureUrl: '' },
+  { id: 3, name: '12 TKR 1', grade: '12', major: 'Teknik Kendaraan Ringan', waliKelasName: 'Ahmad Dahlan, S.T.', waliKelasNip: '198211052008011004', waliSignatureType: 'none', waliSignatureUrl: '' },
 ];
 
 export const DEFAULT_USERS: UserAccount[] = [

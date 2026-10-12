@@ -10,7 +10,9 @@ import {
   DEFAULT_USERS,
   RoleType,
   SchoolData,
+  SignatureDisplayType,
   SPREADSHEET_ID,
+  SPREADSHEET_URL,
   StudentGradesMap,
   StudentItem,
   UserAccount,
@@ -29,6 +31,63 @@ export interface SheetMetadataInfo {
 const REQUIRED_TABS = ['Sekolah', 'Kelas', 'Siswa', 'Users', 'Nilai'];
 const LOCAL_DB_CACHE_KEY = 'eraport_smkn1_db_cache_v2';
 const GAS_BRIDGE_URL_KEY = 'eraport_smkn1_gas_bridge_url';
+const CUSTOM_SPREADSHEET_ID_KEY = 'eraport_smkn1_custom_spreadsheet_id';
+const CUSTOM_SPREADSHEET_URL_KEY = 'eraport_smkn1_custom_spreadsheet_url';
+
+export function extractSpreadsheetId(input: string): string | null {
+  const trimmed = (input || '').trim();
+  if (!trimmed) return null;
+  // Match standard Google Spreadsheet URL: /spreadsheets/d/{ID}
+  const urlMatch = trimmed.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  if (urlMatch && urlMatch[1]) {
+    return urlMatch[1];
+  }
+  // Or direct Spreadsheet ID (alphanumeric, hyphens, underscores, length >= 20)
+  if (/^[a-zA-Z0-9-_]{20,}$/.test(trimmed)) {
+    return trimmed;
+  }
+  return null;
+}
+
+export function getActiveSpreadsheetId(): string {
+  if (typeof window === 'undefined') return SPREADSHEET_ID;
+  const savedId = localStorage.getItem(CUSTOM_SPREADSHEET_ID_KEY);
+  return savedId && savedId.trim() ? savedId.trim() : SPREADSHEET_ID;
+}
+
+export function getActiveSpreadsheetUrl(): string {
+  if (typeof window === 'undefined') return SPREADSHEET_URL;
+  const savedUrl = localStorage.getItem(CUSTOM_SPREADSHEET_URL_KEY);
+  if (savedUrl && savedUrl.trim()) return savedUrl.trim();
+  const id = getActiveSpreadsheetId();
+  if (id !== SPREADSHEET_ID) {
+    return `https://docs.google.com/spreadsheets/d/${id}/edit?gid=0#gid=0`;
+  }
+  return SPREADSHEET_URL;
+}
+
+export function saveActiveSpreadsheetLink(
+  urlOrId: string
+): { id: string; url: string } | null {
+  const extractedId = extractSpreadsheetId(urlOrId);
+  if (!extractedId) return null;
+  const normalizedUrl = urlOrId.trim().startsWith('http')
+    ? urlOrId.trim()
+    : `https://docs.google.com/spreadsheets/d/${extractedId}/edit?gid=0#gid=0`;
+  if (typeof window !== 'undefined') {
+    localStorage.setItem(CUSTOM_SPREADSHEET_ID_KEY, extractedId);
+    localStorage.setItem(CUSTOM_SPREADSHEET_URL_KEY, normalizedUrl);
+  }
+  return { id: extractedId, url: normalizedUrl };
+}
+
+export function resetActiveSpreadsheetLink(): { id: string; url: string } {
+  if (typeof window !== 'undefined') {
+    localStorage.removeItem(CUSTOM_SPREADSHEET_ID_KEY);
+    localStorage.removeItem(CUSTOM_SPREADSHEET_URL_KEY);
+  }
+  return { id: SPREADSHEET_ID, url: SPREADSHEET_URL };
+}
 
 export function getSavedGasBridgeUrl(): string {
   if (typeof window === 'undefined') return '';
@@ -138,6 +197,14 @@ function parseSheetTabsToDatabase(
     ) {
       kv[String(sekolahRows[0][0]).trim()] = String(sekolahRows[0][1] ?? '');
     }
+    const rawKsSigType = (kv['principalSignatureType'] || 'none')
+      .trim()
+      .toLowerCase();
+    const principalSignatureType: SignatureDisplayType =
+      rawKsSigType === 'signature' || rawKsSigType === 'qrcode'
+        ? rawKsSigType
+        : 'none';
+
     school = {
       name: kv['name'] || DEFAULT_SCHOOL.name,
       npsn: kv['npsn'] || DEFAULT_SCHOOL.npsn,
@@ -147,6 +214,8 @@ function parseSheetTabsToDatabase(
       principalNip: kv['principalNip'] || DEFAULT_SCHOOL.principalNip,
       tp: kv['tp'] || DEFAULT_SCHOOL.tp,
       datePrint: kv['datePrint'] || DEFAULT_SCHOOL.datePrint,
+      principalSignatureType,
+      principalSignatureUrl: kv['principalSignatureUrl'] || '',
     };
     if (kv['gasBridgeUrl'] && !getSavedGasBridgeUrl()) {
       saveGasBridgeUrl(kv['gasBridgeUrl']);
@@ -160,14 +229,25 @@ function parseSheetTabsToDatabase(
     classes = kelasRows
       .slice(1)
       .filter((r) => r.length >= 2 && r[1])
-      .map((r, idx) => ({
-        id: Number(r[0]) || idx + 1,
-        name: String(r[1] || '').trim(),
-        grade: String(r[2] || '10').trim(),
-        major: String(r[3] || 'Teknik Kendaraan Ringan').trim(),
-        waliKelasName: String(r[4] || '-').trim(),
-        waliKelasNip: String(r[5] || '-').trim(),
-      }));
+      .map((r, idx) => {
+        const rawWaliSigType = String(r[6] || 'none')
+          .trim()
+          .toLowerCase();
+        const waliSignatureType: SignatureDisplayType =
+          rawWaliSigType === 'signature' || rawWaliSigType === 'qrcode'
+            ? rawWaliSigType
+            : 'none';
+        return {
+          id: Number(r[0]) || idx + 1,
+          name: String(r[1] || '').trim(),
+          grade: String(r[2] || '10').trim(),
+          major: String(r[3] || 'Teknik Kendaraan Ringan').trim(),
+          waliKelasName: String(r[4] || '-').trim(),
+          waliKelasNip: String(r[5] || '-').trim(),
+          waliSignatureType,
+          waliSignatureUrl: String(r[7] || '').trim(),
+        };
+      });
   }
 
   // Parse Users
@@ -185,6 +265,13 @@ function parseSheetTabsToDatabase(
             (x): x is RoleType =>
               x === 'admin' || x === 'walikelas' || x === 'gurumapel'
           );
+        const rawUserSigType = String(r[7] || 'none')
+          .trim()
+          .toLowerCase();
+        const waliSignatureType: SignatureDisplayType =
+          rawUserSigType === 'signature' || rawUserSigType === 'qrcode'
+            ? rawUserSigType
+            : 'none';
         return {
           id: Number(r[0]) || idx + 1,
           username: String(r[1] || '').trim(),
@@ -193,6 +280,8 @@ function parseSheetTabsToDatabase(
           nip: String(r[4] || '').trim(),
           roles: rawRoles.length > 0 ? rawRoles : ['gurumapel'],
           waliKelasFor: String(r[6] || '').trim(),
+          waliSignatureType,
+          waliSignatureUrl: String(r[8] || '').trim(),
         };
       });
   }
@@ -386,6 +475,12 @@ function parseSheetTabsToDatabase(
         waliKelasNip: isMissingNip
           ? matchedWaliUser.nip || '-'
           : cls.waliKelasNip,
+        waliSignatureType:
+          cls.waliSignatureType && cls.waliSignatureType !== 'none'
+            ? cls.waliSignatureType
+            : matchedWaliUser.waliSignatureType || 'none',
+        waliSignatureUrl:
+          cls.waliSignatureUrl || matchedWaliUser.waliSignatureUrl || '',
       };
     }
     return cls;
@@ -424,12 +519,18 @@ export async function fetchFromGoogleSheetsPublic(): Promise<{
   meta: SheetMetadataInfo;
   isEmptySheet: boolean;
 }> {
+  const activeSheetId = getActiveSpreadsheetId();
+
   // Strategy 0: If Google Apps Script Web App Bridge URL is configured, try reading via doGet
   const gasUrl = getSavedGasBridgeUrl();
   if (gasUrl) {
     try {
       const gasRes = await fetch(
-        `${gasUrl}${gasUrl.includes('?') ? '&' : '?'}action=readAll&t=${Date.now()}`
+        `${gasUrl}${
+          gasUrl.includes('?') ? '&' : '?'
+        }action=readAll&spreadsheetId=${encodeURIComponent(
+          activeSheetId
+        )}&t=${Date.now()}`
       );
       if (gasRes.ok) {
         const gasJson = await gasRes.json();
@@ -462,7 +563,7 @@ export async function fetchFromGoogleSheetsPublic(): Promise<{
 
   // Strategy 1: Fetch full workbook via /export?format=xlsx (single request for all tabs!)
   try {
-    const exportUrl = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/export?format=xlsx&t=${Date.now()}`;
+    const exportUrl = `https://docs.google.com/spreadsheets/d/${activeSheetId}/export?format=xlsx&t=${Date.now()}`;
     const res = await fetch(exportUrl);
     if (res.ok) {
       const arrayBuf = await res.arrayBuffer();
@@ -505,7 +606,7 @@ export async function fetchFromGoogleSheetsPublic(): Promise<{
 
   for (const tabName of ['Sheet1', ...REQUIRED_TABS]) {
     try {
-      const csvUrl = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(
+      const csvUrl = `https://docs.google.com/spreadsheets/d/${activeSheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(
         tabName
       )}&t=${Date.now()}`;
       const res = await fetch(csvUrl);
@@ -535,7 +636,7 @@ export async function fetchFromGoogleSheetsPublic(): Promise<{
 
   if (detectedTabs.length === 0) {
     throw new Error(
-      'Tidak dapat menghubungi Google Spreadsheet. Pastikan koneksi internet aktif dan Spreadsheet disetel "Siapa saja yang memiliki link".'
+      'Tidak dapat menghubungi Google Spreadsheet. Pastikan link Spreadsheet benar dan akses disetel "Siapa saja yang memiliki link".'
     );
   }
 
@@ -561,10 +662,12 @@ export async function fetchFromGoogleSheets(
     return fetchFromGoogleSheetsPublic();
   }
 
+  const activeSheetId = getActiveSpreadsheetId();
+
   try {
     // 1. Fetch spreadsheet metadata via OAuth
     const metaRes = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${activeSheetId}`,
       {
         headers: { Authorization: `Bearer ${accessToken}` },
       }
@@ -597,7 +700,7 @@ export async function fetchFromGoogleSheets(
       .map((r) => `ranges=${encodeURIComponent(r)}`)
       .join('&');
     const valRes = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}/values:batchGet?${params}`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${activeSheetId}/values:batchGet?${params}`,
       {
         headers: { Authorization: `Bearer ${accessToken}` },
       }
@@ -698,6 +801,8 @@ function buildSheetTabularValues(payload: DatabasePayload) {
     ['principalNip', payload.school.principalNip],
     ['tp', payload.school.tp],
     ['datePrint', payload.school.datePrint],
+    ['principalSignatureType', payload.school.principalSignatureType || 'none'],
+    ['principalSignatureUrl', payload.school.principalSignatureUrl || ''],
     ...(savedGasUrl ? [['gasBridgeUrl', savedGasUrl]] : []),
   ];
 
@@ -709,6 +814,8 @@ function buildSheetTabularValues(payload: DatabasePayload) {
       'Konsentrasi Keahlian',
       'Wali Kelas',
       'NIP Wali Kelas',
+      'Tipe TTD/QR Wali Kelas',
+      'Data/URL TTD/QR Wali Kelas',
     ],
     ...payload.classes.map((c) => [
       c.id,
@@ -717,6 +824,8 @@ function buildSheetTabularValues(payload: DatabasePayload) {
       c.major,
       c.waliKelasName,
       c.waliKelasNip,
+      c.waliSignatureType || 'none',
+      c.waliSignatureUrl || '',
     ]),
   ];
 
@@ -758,6 +867,8 @@ function buildSheetTabularValues(payload: DatabasePayload) {
       'NIP',
       'Roles',
       'Wali Kelas Untuk',
+      'Tipe TTD/QR Wali Kelas',
+      'Data/URL TTD/QR Wali Kelas',
     ],
     ...payload.users.map((u) => [
       u.id,
@@ -767,6 +878,8 @@ function buildSheetTabularValues(payload: DatabasePayload) {
       u.nip || '',
       u.roles.join(','),
       u.waliKelasFor || '',
+      u.waliSignatureType || 'none',
+      u.waliSignatureUrl || '',
     ]),
   ];
 
@@ -801,6 +914,7 @@ export async function syncViaGasWebApp(
 ): Promise<SheetMetadataInfo> {
   saveLocalDatabaseCache(payload);
   const tables = buildSheetTabularValues(payload);
+  const activeSheetId = getActiveSpreadsheetId();
 
   const res = await fetch(gasUrl.trim(), {
     method: 'POST',
@@ -810,7 +924,7 @@ export async function syncViaGasWebApp(
     },
     body: JSON.stringify({
       action: 'syncAll',
-      spreadsheetId: SPREADSHEET_ID,
+      spreadsheetId: activeSheetId,
       sheets: {
         Sheet1: tables.gid0Values,
         Sekolah: tables.sekolahValues,
@@ -843,6 +957,7 @@ export async function syncAllToGoogleSheets(
 ): Promise<SheetMetadataInfo> {
   saveLocalDatabaseCache(payload);
   const gasUrl = getSavedGasBridgeUrl();
+  const activeSheetId = getActiveSpreadsheetId();
 
   // If no OAuth token is present, use GAS Web App Bridge if configured
   if (!accessToken && gasUrl) {
@@ -857,7 +972,7 @@ export async function syncAllToGoogleSheets(
 
   // 1. Fetch current metadata to check existing sheet tabs
   const metaRes = await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${activeSheetId}`,
     {
       headers: { Authorization: `Bearer ${accessToken}` },
     }
@@ -891,7 +1006,7 @@ export async function syncAllToGoogleSheets(
       addSheet: { properties: { title } },
     }));
     const addTabRes = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}:batchUpdate`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${activeSheetId}:batchUpdate`,
       {
         method: 'POST',
         headers: {
@@ -915,7 +1030,7 @@ export async function syncAllToGoogleSheets(
     ...REQUIRED_TABS.map((t) => `'${t}'!A1:Z1000`),
   ];
   await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}/values:batchClear`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${activeSheetId}/values:batchClear`,
     {
       method: 'POST',
       headers: {
@@ -931,7 +1046,7 @@ export async function syncAllToGoogleSheets(
 
   // 5. Batch update values across all sheets
   const batchWriteRes = await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}/values:batchUpdate`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${activeSheetId}/values:batchUpdate`,
     {
       method: 'POST',
       headers: {
@@ -973,16 +1088,18 @@ export async function syncAllToGoogleSheets(
 }
 
 export function getGasBridgeScriptCode(): string {
+  const activeSheetId = getActiveSpreadsheetId();
   return `// ============================================================================
 // GOOGLE APPS SCRIPT BRIDGE - E-RAPORT STS SMKN 1 MESUJI TIMUR
 // Pasang di Spreadsheet (Ekstensi -> Apps Script -> Terapkan -> Deployment Baru -> Aplikasi Web -> Akses: Siapa saja / Anyone)
 // Solusi agar aplikasi di Vercel dapat Membaca & Menyimpan ke Spreadsheet tanpa terkendala Login Google OAuth
 // ============================================================================
-const SPREADSHEET_ID = '${SPREADSHEET_ID}';
+const SPREADSHEET_ID = '${activeSheetId}';
 
 function doGet(e) {
   try {
-    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const targetId = (e && e.parameter && e.parameter.spreadsheetId) ? e.parameter.spreadsheetId : SPREADSHEET_ID;
+    const ss = SpreadsheetApp.openById(targetId);
     const sheets = ss.getSheets();
     const resultSheets = {};
     sheets.forEach(function(sh) {
@@ -1032,4 +1149,5 @@ function doPost(e) {
   }
 }`;
 }
+
 

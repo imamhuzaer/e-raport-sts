@@ -12,6 +12,7 @@ import {
   RankedStudentItem,
   RoleType,
   SchoolData,
+  SignatureDisplayType,
   SPREADSHEET_ID,
   SPREADSHEET_URL,
   StudentGradesMap,
@@ -29,9 +30,13 @@ import {
 import {
   fetchFromGoogleSheets,
   fetchFromGoogleSheetsPublic,
+  getActiveSpreadsheetId,
+  getActiveSpreadsheetUrl,
   getGasBridgeScriptCode,
   getSavedGasBridgeUrl,
   loadLocalDatabaseCache,
+  resetActiveSpreadsheetLink,
+  saveActiveSpreadsheetLink,
   saveGasBridgeUrl,
   saveLocalDatabaseCache,
   SheetMetadataInfo,
@@ -52,7 +57,9 @@ import {
   parseBulkStudents,
   parseBulkWaliKelasUsers,
   parsePastedTextToRows,
+  processUploadedSignatureOrQrImage,
   readSpreadsheetFileToRows,
+  removeWhiteBackgroundFromDataUrl,
 } from './services/templateAndPdfService';
 import { RaportTemplate } from './components/RaportTemplate';
 import { GoogleSignInButton } from './components/GoogleSignInButton';
@@ -98,6 +105,15 @@ export default function App() {
   const [showGasScriptModal, setShowGasScriptModal] = useState(false);
   const [vercelDomainError, setVercelDomainError] = useState<string | null>(
     null
+  );
+  const [activeSheetId, setActiveSheetId] = useState<string>(() =>
+    getActiveSpreadsheetId()
+  );
+  const [activeSheetUrl, setActiveSheetUrl] = useState<string>(() =>
+    getActiveSpreadsheetUrl()
+  );
+  const [spreadsheetLinkInput, setSpreadsheetLinkInput] = useState<string>(() =>
+    getActiveSpreadsheetUrl()
   );
 
   // Core Application Database State
@@ -162,12 +178,22 @@ export default function App() {
   });
 
   const [showAddClassModal, setShowAddClassModal] = useState(false);
-  const [newClass, setNewClass] = useState({
+  const [newClass, setNewClass] = useState<{
+    grade: string;
+    name: string;
+    major: string;
+    waliKelasName: string;
+    waliKelasNip: string;
+    waliSignatureType: SignatureDisplayType;
+    waliSignatureUrl: string;
+  }>({
     grade: '10',
     name: '',
     major: 'Teknik Kendaraan Ringan',
     waliKelasName: '',
     waliKelasNip: '',
+    waliSignatureType: 'none',
+    waliSignatureUrl: '',
   });
 
   // Edit Class Wali Kelas Modal
@@ -684,11 +710,30 @@ export default function App() {
       }
     }
 
+    let resolvedWaliSigType: SignatureDisplayType =
+      cls?.waliSignatureType && cls.waliSignatureType !== 'none'
+        ? cls.waliSignatureType
+        : waliUser?.waliSignatureType && waliUser.waliSignatureType !== 'none'
+        ? waliUser.waliSignatureType
+        : 'none';
+
+    let resolvedWaliSigUrl =
+      cls?.waliSignatureUrl || waliUser?.waliSignatureUrl || '';
+
+    if (
+      resolvedWaliSigUrl &&
+      (!resolvedWaliSigType || resolvedWaliSigType === 'none')
+    ) {
+      resolvedWaliSigType = 'signature';
+    }
+
     return {
       ...cls,
       name: cls?.name || className,
       waliKelasName: resolvedWaliName,
       waliKelasNip: resolvedWaliNip,
+      waliSignatureType: resolvedWaliSigType,
+      waliSignatureUrl: resolvedWaliSigUrl,
     };
   };
 
@@ -696,15 +741,165 @@ export default function App() {
     return subjectTemplates[grade] || subjectTemplates['10'];
   };
 
+  // Image Upload Handlers for Scan TTD / QR Code (Kepala Sekolah & Wali Kelas)
+  const handleUploadPrincipalSigOrQr = async (
+    e: React.ChangeEvent<HTMLInputElement>,
+    targetMode?: 'signature' | 'qrcode'
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const mode: 'signature' | 'qrcode' =
+      targetMode ||
+      (school.principalSignatureType === 'qrcode' ? 'qrcode' : 'signature');
+    try {
+      const dataUrl = await processUploadedSignatureOrQrImage(
+        file,
+        mode,
+        mode === 'signature'
+      );
+      setSchool((prev) => ({
+        ...prev,
+        principalSignatureType: mode,
+        principalSignatureUrl: dataUrl,
+      }));
+      showToast(
+        `${
+          mode === 'qrcode' ? 'QR Code' : 'Scan TTD'
+        } Kepala Sekolah berhasil diunggah! Klik "Simpan Data Sekolah" untuk menyimpan.`,
+        'success'
+      );
+    } catch (err: any) {
+      showToast(
+        err?.message || 'Gagal memproses file gambar TTD/QR Kepala Sekolah.',
+        'danger'
+      );
+    } finally {
+      e.target.value = '';
+    }
+  };
+
+  const handleUploadEditingClassWaliSigOrQr = async (
+    e: React.ChangeEvent<HTMLInputElement>,
+    targetMode?: 'signature' | 'qrcode'
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file || !editingClass) return;
+    const mode: 'signature' | 'qrcode' =
+      targetMode ||
+      (editingClass.waliSignatureType === 'qrcode' ? 'qrcode' : 'signature');
+    try {
+      const dataUrl = await processUploadedSignatureOrQrImage(
+        file,
+        mode,
+        mode === 'signature'
+      );
+      setEditingClass({
+        ...editingClass,
+        waliSignatureType: mode,
+        waliSignatureUrl: dataUrl,
+      });
+      showToast(
+        `${
+          mode === 'qrcode' ? 'QR Code' : 'Scan TTD'
+        } Wali Kelas berhasil dimuat! Klik "Simpan Perubahan" untuk menyimpan.`,
+        'success'
+      );
+    } catch (err: any) {
+      showToast(
+        err?.message || 'Gagal memproses file gambar TTD/QR Wali Kelas.',
+        'danger'
+      );
+    } finally {
+      e.target.value = '';
+    }
+  };
+
+  const handleUploadNewClassWaliSigOrQr = async (
+    e: React.ChangeEvent<HTMLInputElement>,
+    targetMode?: 'signature' | 'qrcode'
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const mode: 'signature' | 'qrcode' =
+      targetMode ||
+      (newClass.waliSignatureType === 'qrcode' ? 'qrcode' : 'signature');
+    try {
+      const dataUrl = await processUploadedSignatureOrQrImage(
+        file,
+        mode,
+        mode === 'signature'
+      );
+      setNewClass((prev) => ({
+        ...prev,
+        waliSignatureType: mode,
+        waliSignatureUrl: dataUrl,
+      }));
+      showToast(
+        `${
+          mode === 'qrcode' ? 'QR Code' : 'Scan TTD'
+        } Wali Kelas berhasil dimuat!`,
+        'success'
+      );
+    } catch (err: any) {
+      showToast(
+        err?.message || 'Gagal memproses file gambar TTD/QR Wali Kelas.',
+        'danger'
+      );
+    } finally {
+      e.target.value = '';
+    }
+  };
+
+  // Change / Reset Active Spreadsheet Link Handlers (Admin Only)
+  const handleSaveCustomSpreadsheetLink = async () => {
+    const saved = saveActiveSpreadsheetLink(spreadsheetLinkInput);
+    if (!saved) {
+      showToast(
+        'Format Link atau ID Google Spreadsheet tidak valid. Pastikan menyalin URL lengkap dari Google Sheets.',
+        'danger'
+      );
+      return;
+    }
+    setActiveSheetId(saved.id);
+    setActiveSheetUrl(saved.url);
+    setSpreadsheetLinkInput(saved.url);
+    showToast(
+      `Link Database Spreadsheet berhasil diubah (ID: ${saved.id.slice(
+        0,
+        14
+      )}...)! Memuat data dari Spreadsheet baru...`,
+      'success'
+    );
+    await loadFromGoogleSheets();
+  };
+
+  const handleResetSpreadsheetLink = async () => {
+    const reset = resetActiveSpreadsheetLink();
+    setActiveSheetId(reset.id);
+    setActiveSheetUrl(reset.url);
+    setSpreadsheetLinkInput(reset.url);
+    showToast(
+      'Link Database Spreadsheet dikembalikan ke Spreadsheet Default!',
+      'success'
+    );
+    await loadFromGoogleSheets();
+  };
+
   // Admin & CRUD Operations
   const handleSaveSchoolData = () => {
     setPendingMutation({
-      title: 'Simpan Identitas Sekolah',
+      title: 'Simpan Identitas Sekolah & TTD/QR Kepala Sekolah',
       description:
-        'Anda akan memperbarui data Identitas Sekolah & Titimangsa SMKN 1 Mesuji Timur.',
-      affectedSummary: `Sekolah: ${school.name} (TP ${school.tp}, Kepsek: ${formatTeacherNameWithTitle(
-        school.principal
-      )})`,
+        'Anda akan memperbarui data Identitas Sekolah, Logo, serta TTD/QR Code Kepala Sekolah SMKN 1 Mesuji Timur.',
+      affectedSummary: `Sekolah: ${school.name} (TP ${
+        school.tp
+      }, Kepsek: ${formatTeacherNameWithTitle(school.principal)}, Mode TTD/QR: ${
+        school.principalSignatureType === 'qrcode'
+          ? 'QR Code KS'
+          : school.principalSignatureType === 'signature'
+          ? 'Scan TTD KS'
+          : 'Manual'
+      })`,
       executeLocalAndReturnPayload: () => ({
         school,
         classes,
@@ -727,6 +922,12 @@ export default function App() {
       major: newClass.major.trim() || 'Teknik Kendaraan Ringan',
       waliKelasName: newClass.waliKelasName.trim() || '-',
       waliKelasNip: newClass.waliKelasNip.trim() || '-',
+      waliSignatureType: newClass.waliSignatureUrl
+        ? newClass.waliSignatureType === 'none'
+          ? 'signature'
+          : newClass.waliSignatureType
+        : 'none',
+      waliSignatureUrl: newClass.waliSignatureUrl || '',
     };
 
     setPendingMutation({
@@ -744,6 +945,8 @@ export default function App() {
           major: 'Teknik Kendaraan Ringan',
           waliKelasName: '',
           waliKelasNip: '',
+          waliSignatureType: 'none',
+          waliSignatureUrl: '',
         });
         setShowAddClassModal(false);
         return {
@@ -759,23 +962,40 @@ export default function App() {
 
   const handleSaveEditedClass = () => {
     if (!editingClass) return;
-    const updatedCls = {
+    const normalizedSigType: SignatureDisplayType =
+      editingClass.waliSignatureUrl &&
+      (!editingClass.waliSignatureType ||
+        editingClass.waliSignatureType === 'none')
+        ? 'signature'
+        : editingClass.waliSignatureUrl
+        ? editingClass.waliSignatureType || 'signature'
+        : 'none';
+
+    const updatedCls: ClassItem = {
       ...editingClass,
       name: editingClass.name.trim(),
       major: editingClass.major.trim() || 'Teknik Kendaraan Ringan',
       waliKelasName: editingClass.waliKelasName.trim() || '-',
       waliKelasNip: editingClass.waliKelasNip.trim() || '-',
+      waliSignatureType: normalizedSigType,
+      waliSignatureUrl: editingClass.waliSignatureUrl || '',
     };
 
     setPendingMutation({
-      title: 'Simpan Perubahan Data Kelas & Wali Kelas',
-      description: `Anda akan memperbarui data Wali Kelas dan NIP/NUPTK untuk rombel ${updatedCls.name}.`,
+      title: 'Simpan Perubahan Data Kelas, Wali Kelas & TTD/QR',
+      description: `Anda akan memperbarui data Wali Kelas, NIP/NUPTK, serta TTD/QR Code untuk rombel ${updatedCls.name}.`,
       affectedSummary: `Rombel ${updatedCls.name}: Wali Kelas "${formatTeacherNameWithTitle(
         updatedCls.waliKelasName
       )}"${
         formatNipOrNuptk(updatedCls.waliKelasNip).formatted
           ? ` (${formatNipOrNuptk(updatedCls.waliKelasNip).formatted})`
           : ''
+      } • Mode TTD: ${
+        updatedCls.waliSignatureType === 'qrcode'
+          ? 'QR Code Wali Kelas'
+          : updatedCls.waliSignatureType === 'signature'
+          ? 'Scan TTD Wali Kelas'
+          : 'Manual'
       }`,
       executeLocalAndReturnPayload: () => {
         const nextClasses = classes.map((c) =>
@@ -785,8 +1005,8 @@ export default function App() {
         const nextUsers = users.map((u) => {
           if (
             u.roles.includes('walikelas') &&
-            u.waliKelasFor.trim().toLowerCase() ===
-              updatedCls.name.toLowerCase()
+            normalizeClassKey(u.waliKelasFor) ===
+              normalizeClassKey(updatedCls.name)
           ) {
             return {
               ...u,
@@ -798,6 +1018,8 @@ export default function App() {
                 updatedCls.waliKelasNip !== '-'
                   ? updatedCls.waliKelasNip
                   : u.nip,
+              waliSignatureType: updatedCls.waliSignatureType,
+              waliSignatureUrl: updatedCls.waliSignatureUrl,
             };
           }
           return u;
@@ -1495,7 +1717,7 @@ export default function App() {
       title: 'Sinkronkan Seluruh Data ke Google Sheets',
       description:
         'Tindakan ini akan menulis ulang dan menyinkronkan seluruh data aplikasi (Sekolah, Kelas, Siswa, Pengguna, Nilai, dan Master Leger gid=0) ke Google Sheets.',
-      affectedSummary: `Spreadsheet ID: ${SPREADSHEET_ID} • ${classes.length} Kelas, ${students.length} Siswa, ${users.length} Pengguna`,
+      affectedSummary: `Spreadsheet ID: ${activeSheetId} • ${classes.length} Kelas, ${students.length} Siswa, ${users.length} Pengguna`,
       executeLocalAndReturnPayload: () => ({
         school,
         classes,
@@ -3959,6 +4181,254 @@ export default function App() {
                           paling atas raport.
                         </span>
                       </div>
+
+                      {/* FITUR 1: UPLOAD SCAN TTD KEPALA SEKOLAH ATAU QR CODE KEPALA SEKOLAH */}
+                      <div className="md:col-span-2 p-5 rounded-xl bg-blue-50/60 border border-blue-200 space-y-4">
+                        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-blue-200/80 pb-3">
+                          <div>
+                            <span className="inline-block px-2 py-0.5 rounded bg-blue-600 text-white text-[10px] font-bold uppercase tracking-wide mb-1">
+                              Tanda Tangan Elektronik / Digital Kepala Sekolah
+                            </span>
+                            <h6 className="font-bold text-sm text-slate-900">
+                              <i className="fas fa-signature text-blue-600 mr-1.5"></i>
+                              Upload Scan TTD Kepala Sekolah atau Upload QR Code Kepala Sekolah
+                            </h6>
+                            <p className="text-xs text-slate-500 mt-0.5">
+                              Pilih jenis tampilan tanda tangan Kepala Sekolah pada bagian bawah cetak Raport & PDF.
+                            </p>
+                          </div>
+                          {school.principalSignatureUrl && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setSchool({
+                                  ...school,
+                                  principalSignatureType: 'none',
+                                  principalSignatureUrl: '',
+                                })
+                              }
+                              className="px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 rounded-lg text-xs font-bold cursor-pointer"
+                            >
+                              <i className="fas fa-trash-alt mr-1.5"></i>
+                              Hapus Gambar TTD/QR KS
+                            </button>
+                          )}
+                        </div>
+
+                        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+                          <div className="lg:col-span-7 space-y-3.5">
+                            {/* Mode Selector */}
+                            <div>
+                              <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                                1. Pilih Jenis Tanda Tangan Kepala Sekolah di Raport:
+                              </label>
+                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setSchool({
+                                      ...school,
+                                      principalSignatureType: 'none',
+                                    })
+                                  }
+                                  className={`px-3 py-2 rounded-lg text-xs font-bold border text-left transition-all cursor-pointer ${
+                                    (!school.principalSignatureType ||
+                                      school.principalSignatureType ===
+                                        'none')
+                                      ? 'bg-slate-800 text-white border-slate-800 shadow-sm'
+                                      : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                                  }`}
+                                >
+                                  <i className="fas fa-pen-nib mr-1.5"></i>
+                                  TTD Manual (Kosong)
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setSchool({
+                                      ...school,
+                                      principalSignatureType: 'signature',
+                                    })
+                                  }
+                                  className={`px-3 py-2 rounded-lg text-xs font-bold border text-left transition-all cursor-pointer ${
+                                    school.principalSignatureType ===
+                                    'signature'
+                                      ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                                      : 'bg-white text-slate-700 border-slate-300 hover:bg-blue-50'
+                                  }`}
+                                >
+                                  <i className="fas fa-signature mr-1.5"></i>
+                                  Scan TTD KS
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setSchool({
+                                      ...school,
+                                      principalSignatureType: 'qrcode',
+                                    })
+                                  }
+                                  className={`px-3 py-2 rounded-lg text-xs font-bold border text-left transition-all cursor-pointer ${
+                                    school.principalSignatureType === 'qrcode'
+                                      ? 'bg-emerald-600 text-white border-emerald-600 shadow-sm'
+                                      : 'bg-white text-slate-700 border-slate-300 hover:bg-emerald-50'
+                                  }`}
+                                >
+                                  <i className="fas fa-qrcode mr-1.5"></i>
+                                  QR Code KS
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Upload Buttons */}
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                              <label className="flex items-center justify-center gap-2 px-3.5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg cursor-pointer shadow-sm transition-colors">
+                                <i className="fas fa-file-signature"></i>
+                                <span>Upload File Scan TTD KS</span>
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  onChange={(e) =>
+                                    handleUploadPrincipalSigOrQr(
+                                      e,
+                                      'signature'
+                                    )
+                                  }
+                                  className="hidden"
+                                />
+                              </label>
+                              <label className="flex items-center justify-center gap-2 px-3.5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg cursor-pointer shadow-sm transition-colors">
+                                <i className="fas fa-qrcode"></i>
+                                <span>Upload File QR Code KS</span>
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  onChange={(e) =>
+                                    handleUploadPrincipalSigOrQr(e, 'qrcode')
+                                  }
+                                  className="hidden"
+                                />
+                              </label>
+                            </div>
+
+                            {/* Optional URL Input & White Background Cleaner */}
+                            <div>
+                              <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                                Atau Tempelkan Link URL Gambar TTD / QR Code Kepala Sekolah:
+                              </label>
+                              <div className="flex flex-wrap sm:flex-nowrap gap-2">
+                                <input
+                                  type="text"
+                                  value={school.principalSignatureUrl || ''}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    setSchool({
+                                      ...school,
+                                      principalSignatureUrl: val,
+                                      principalSignatureType:
+                                        val &&
+                                        (!school.principalSignatureType ||
+                                          school.principalSignatureType ===
+                                            'none')
+                                          ? 'signature'
+                                          : school.principalSignatureType,
+                                    });
+                                  }}
+                                  placeholder="https://... atau upload file gambar di atas"
+                                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-mono outline-none focus:border-blue-600"
+                                />
+                                {school.principalSignatureUrl &&
+                                  school.principalSignatureType ===
+                                    'signature' && (
+                                    <button
+                                      type="button"
+                                      onClick={async () => {
+                                        try {
+                                          const cleaned =
+                                            await removeWhiteBackgroundFromDataUrl(
+                                              school.principalSignatureUrl!
+                                            );
+                                          setSchool({
+                                            ...school,
+                                            principalSignatureUrl: cleaned,
+                                          });
+                                          showToast(
+                                            'Background putih pada Scan TTD Kepala Sekolah berhasil dibuat transparan!',
+                                            'success'
+                                          );
+                                        } catch {
+                                          showToast(
+                                            'Gagal memproses background gambar eksternal.',
+                                            'danger'
+                                          );
+                                        }
+                                      }}
+                                      className="px-3 py-2 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-lg text-xs font-bold cursor-pointer whitespace-nowrap"
+                                      title="Hapus background kertas putih agar tanda tangan menyatu dengan raport"
+                                    >
+                                      <i className="fas fa-magic mr-1 text-blue-600"></i>
+                                      Transparankan BG
+                                    </button>
+                                  )}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Live Preview Box */}
+                          <div className="lg:col-span-5 bg-white rounded-xl border border-slate-200 p-4 text-center shadow-xs">
+                            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-2 border-b border-slate-100 pb-1.5">
+                              Preview Tampilan di Raport (Kepala Sekolah)
+                            </div>
+                            <div
+                              style={{
+                                fontFamily: "'Times New Roman', Times, serif",
+                                fontSize: '10pt',
+                                lineHeight: 1.25,
+                                color: '#000',
+                              }}
+                            >
+                              <p className="mb-0">Mengetahui,</p>
+                              <p className="font-bold mb-0">
+                                Kepala SMKN 1 Mesuji Timur
+                              </p>
+                              {school.principalSignatureType &&
+                              school.principalSignatureType !== 'none' &&
+                              school.principalSignatureUrl ? (
+                                <div className="h-14 flex items-center justify-center my-1">
+                                  <img
+                                    src={school.principalSignatureUrl}
+                                    alt="Preview TTD/QR KS"
+                                    className={
+                                      school.principalSignatureType === 'qrcode'
+                                        ? 'w-12 h-12 object-contain mx-auto'
+                                        : 'max-h-12 max-w-[170px] object-contain mx-auto'
+                                    }
+                                  />
+                                </div>
+                              ) : (
+                                <div className="h-12 flex items-center justify-center text-[11px] font-sans text-slate-400 italic">
+                                  (Ruang Tanda Tangan Basah / Manual)
+                                </div>
+                              )}
+                              <p className="font-bold underline mb-0">
+                                {formatTeacherNameWithTitle(school.principal)}
+                              </p>
+                              {formatNipOrNuptk(school.principalNip)
+                                .formatted && (
+                                <p
+                                  className="mb-0"
+                                  style={{ fontSize: '8.5pt' }}
+                                >
+                                  {
+                                    formatNipOrNuptk(school.principalNip)
+                                      .formatted
+                                  }
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
                     </div>
                     <div className="mt-5 text-right">
                       <button
@@ -3967,7 +4437,7 @@ export default function App() {
                         className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer"
                       >
                         <i className="fas fa-save mr-1.5"></i> Simpan Data
-                        Sekolah & Logo
+                        Sekolah, Logo & TTD/QR KS
                       </button>
                     </div>
                   </div>
@@ -3980,11 +4450,12 @@ export default function App() {
                       <div>
                         <h5 className="font-bold text-base text-slate-900 mb-0">
                           <i className="fas fa-list text-blue-600 mr-2"></i>
-                          Daftar Rombongan Belajar & Wali Kelas
+                          Daftar Rombongan Belajar, Wali Kelas & TTD/QR Wali Kelas
                         </h5>
                         <span className="text-xs text-slate-500">
-                          18 digit otomatis terbaca sebagai <b>NIP.</b> dan 16
-                          digit otomatis terbaca sebagai <b>NUPTK.</b>
+                          Klik <b>Edit & Upload TTD/QR</b> pada kelas untuk
+                          mengatur Nama, NIP/NUPTK, serta Scan TTD atau QR Code
+                          Wali Kelas.
                         </span>
                       </div>
                       <div className="flex flex-wrap gap-2">
@@ -4042,6 +4513,9 @@ export default function App() {
                               <th className="py-3 px-4">
                                 Identitas (Otomatis NIP / NUPTK)
                               </th>
+                              <th className="py-3 px-4 text-center">
+                                TTD / QR Wali Kelas
+                              </th>
                               <th className="py-3 px-4 text-right">Aksi</th>
                             </tr>
                           </thead>
@@ -4074,6 +4548,29 @@ export default function App() {
                                       </span>
                                     )}
                                   </td>
+                                  <td className="py-3 px-4 text-center">
+                                    {resolved.waliSignatureType &&
+                                    resolved.waliSignatureType !== 'none' &&
+                                    resolved.waliSignatureUrl ? (
+                                      <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200">
+                                        <img
+                                          src={resolved.waliSignatureUrl}
+                                          alt="TTD/QR Wali"
+                                          className="h-6 w-auto max-w-[56px] object-contain bg-white rounded border border-slate-200 p-0.5"
+                                        />
+                                        <span className="text-[11px] font-bold text-emerald-700">
+                                          {resolved.waliSignatureType ===
+                                          'qrcode'
+                                            ? 'QR Code'
+                                            : 'Scan TTD'}
+                                        </span>
+                                      </div>
+                                    ) : (
+                                      <span className="text-xs text-slate-400">
+                                        Manual / Belum Diupload
+                                      </span>
+                                    )}
+                                  </td>
                                   <td className="py-3 px-4 text-right space-x-1.5 whitespace-nowrap">
                                     <button
                                       type="button"
@@ -4084,12 +4581,18 @@ export default function App() {
                                             resolved.waliKelasName || '',
                                           waliKelasNip:
                                             resolved.waliKelasNip || '',
+                                          waliSignatureType:
+                                            resolved.waliSignatureType ||
+                                            'none',
+                                          waliSignatureUrl:
+                                            resolved.waliSignatureUrl || '',
                                         })
                                       }
-                                      className="px-2.5 py-1 border border-blue-300 text-blue-600 hover:bg-blue-50 rounded text-xs cursor-pointer"
-                                      title="Edit Wali Kelas & NIP/NUPTK"
+                                      className="px-2.5 py-1 border border-blue-300 text-blue-600 hover:bg-blue-50 rounded text-xs font-semibold cursor-pointer"
+                                      title="Edit Wali Kelas & Upload Scan TTD / QR Code"
                                     >
-                                      <i className="fas fa-edit mr-1"></i> Edit
+                                      <i className="fas fa-signature mr-1"></i>{' '}
+                                      Edit & TTD/QR
                                     </button>
                                     <button
                                       type="button"
@@ -4449,14 +4952,14 @@ export default function App() {
                           Integrasi Database Google Spreadsheet (Khusus Admin)
                         </h5>
                         <p className="text-xs text-slate-500">
-                          Spreadsheet Target:{' '}
+                          Spreadsheet Aktif:{' '}
                           <a
-                            href={SPREADSHEET_URL}
+                            href={activeSheetUrl}
                             target="_blank"
                             rel="noreferrer"
-                            className="font-mono text-blue-600 underline"
+                            className="font-mono text-blue-600 underline break-all"
                           >
-                            {SPREADSHEET_URL}
+                            {activeSheetUrl}
                           </a>
                         </p>
                       </div>
@@ -4506,6 +5009,67 @@ export default function App() {
                         >
                           <i className="fas fa-cloud-upload-alt mr-1.5"></i>
                           Tulis / Inisialisasi ke Spreadsheet
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* FITUR 2: UBAH LINK DATABASE SPREADSHEET */}
+                    <div className="p-5 rounded-xl bg-emerald-50/70 border border-emerald-200 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <span className="inline-block px-2 py-0.5 rounded bg-emerald-600 text-white text-[10px] font-bold uppercase tracking-wide mb-1">
+                            Pengaturan Link Spreadsheet Target
+                          </span>
+                          <h6 className="font-bold text-sm text-slate-900">
+                            <i className="fas fa-link text-emerald-600 mr-1.5"></i>
+                            Ubah Link / URL Database Google Spreadsheet
+                          </h6>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] font-mono bg-white px-2.5 py-1 rounded border border-emerald-200 text-slate-700">
+                            ID Aktif: <b>{activeSheetId}</b>
+                          </span>
+                          {activeSheetId !== SPREADSHEET_ID && (
+                            <button
+                              type="button"
+                              onClick={handleResetSpreadsheetLink}
+                              disabled={isSyncingSheets}
+                              className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-lg text-xs font-bold cursor-pointer"
+                            >
+                              <i className="fas fa-undo mr-1"></i> Reset ke
+                              Spreadsheet Default
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      <p className="text-xs text-slate-600">
+                        Tempelkan link URL Google Spreadsheet baru Anda (contoh:{' '}
+                        <span className="font-mono text-[11px]">
+                          https://docs.google.com/spreadsheets/d/.../edit
+                        </span>
+                        ) atau ID Spreadsheet untuk mengganti database yang
+                        digunakan aplikasi.
+                      </p>
+
+                      <div className="flex flex-wrap sm:flex-nowrap gap-2">
+                        <input
+                          type="text"
+                          value={spreadsheetLinkInput}
+                          onChange={(e) =>
+                            setSpreadsheetLinkInput(e.target.value)
+                          }
+                          placeholder="https://docs.google.com/spreadsheets/d/13V9knEZFWKpGUWGD9EBClAdollTV7YQHT0AW6Oq3ahU/edit"
+                          className="w-full px-3.5 py-2 bg-white border border-slate-300 rounded-lg text-xs font-mono outline-none focus:border-emerald-600"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleSaveCustomSpreadsheetLink}
+                          disabled={isSyncingSheets}
+                          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg cursor-pointer whitespace-nowrap shadow-xs"
+                        >
+                          <i className="fas fa-check-circle mr-1.5"></i> Simpan
+                          & Hubungkan Spreadsheet
                         </button>
                       </div>
                     </div>
@@ -5107,13 +5671,28 @@ export default function App() {
                                 activeWaliClassInfo.waliKelasName || '',
                               waliKelasNip:
                                 activeWaliClassInfo.waliKelasNip || '',
+                              waliSignatureType:
+                                activeWaliClassInfo.waliSignatureType || 'none',
+                              waliSignatureUrl:
+                                activeWaliClassInfo.waliSignatureUrl || '',
                             });
                           }
                         }}
-                        className="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 text-blue-700 font-semibold rounded text-[11px] cursor-pointer"
+                        className="px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 font-bold rounded-lg text-xs cursor-pointer inline-flex items-center gap-1.5"
                       >
-                        <i className="fas fa-pen mr-1"></i> Ubah Nama/NIP Wali
+                        <i className="fas fa-signature"></i> Atur Nama, NIP &
+                        Upload Scan TTD / QR Wali Kelas
                       </button>
+                      {activeWaliClassInfo.waliSignatureType &&
+                        activeWaliClassInfo.waliSignatureType !== 'none' &&
+                        activeWaliClassInfo.waliSignatureUrl && (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-emerald-700 font-bold text-[11px]">
+                            <i className="fas fa-check-circle"></i>
+                            {activeWaliClassInfo.waliSignatureType === 'qrcode'
+                              ? 'QR Code Wali Kelas Aktif'
+                              : 'Scan TTD Wali Kelas Aktif'}
+                          </span>
+                        )}
                     </div>
                   </div>
                   <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 px-3.5 py-2 rounded-lg">
@@ -5550,13 +6129,13 @@ export default function App() {
             </div>
           )}
 
-          {/* MODAL: EDIT CLASS & WALI KELAS */}
+          {/* MODAL: EDIT CLASS, WALI KELAS & TTD/QR WALI KELAS */}
           {editingClass && (
-            <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/60 p-4 no-print">
-              <div className="bg-white rounded-xl shadow-xl max-w-md w-full overflow-hidden">
+            <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/60 p-4 no-print overflow-y-auto">
+              <div className="bg-white rounded-xl shadow-xl max-w-lg w-full overflow-hidden my-8">
                 <div className="px-5 py-4 border-b border-slate-200 flex justify-between items-center">
                   <h5 className="font-bold text-base text-slate-900">
-                    Edit Kelas & Wali Kelas ({editingClass.name})
+                    Edit Wali Kelas & Upload TTD / QR Code ({editingClass.name})
                   </h5>
                   <button
                     type="button"
@@ -5566,7 +6145,7 @@ export default function App() {
                     <i className="fas fa-times"></i>
                   </button>
                 </div>
-                <div className="p-5 space-y-3.5">
+                <div className="p-5 space-y-3.5 max-h-[80vh] overflow-y-auto">
                   <div className="grid grid-cols-2 gap-3">
                     <div>
                       <label className="block text-xs font-bold text-slate-700 mb-1">
@@ -5574,13 +6153,14 @@ export default function App() {
                       </label>
                       <select
                         value={editingClass.grade}
+                        disabled={activeRole !== 'admin'}
                         onChange={(e) =>
                           setEditingClass({
                             ...editingClass,
                             grade: e.target.value,
                           })
                         }
-                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm disabled:bg-slate-100"
                       >
                         <option value="10">Kelas 10</option>
                         <option value="11">Kelas 11</option>
@@ -5594,13 +6174,14 @@ export default function App() {
                       <input
                         type="text"
                         value={editingClass.name}
+                        disabled={activeRole !== 'admin'}
                         onChange={(e) =>
                           setEditingClass({
                             ...editingClass,
                             name: e.target.value,
                           })
                         }
-                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm disabled:bg-slate-100"
                       />
                     </div>
                   </div>
@@ -5611,13 +6192,14 @@ export default function App() {
                     <input
                       type="text"
                       value={editingClass.major}
+                      disabled={activeRole !== 'admin'}
                       onChange={(e) =>
                         setEditingClass({
                           ...editingClass,
                           major: e.target.value,
                         })
                       }
-                      className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm disabled:bg-slate-100"
                     />
                   </div>
                   <div>
@@ -5667,6 +6249,213 @@ export default function App() {
                           'Tanpa NIP/NUPTK (Ditampilkan Hanya Nama Guru)'}
                       </b>
                     </span>
+                  </div>
+
+                  {/* FITUR 3: UPLOAD SCAN TTD WALI KELAS ATAU QR CODE WALI KELAS */}
+                  <div className="p-4 rounded-xl bg-emerald-50/70 border border-emerald-200 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-slate-800">
+                        <i className="fas fa-signature text-emerald-600 mr-1.5"></i>
+                        Scan TTD / QR Code Wali Kelas (Tampil di Raport)
+                      </span>
+                      {editingClass.waliSignatureUrl && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setEditingClass({
+                              ...editingClass,
+                              waliSignatureType: 'none',
+                              waliSignatureUrl: '',
+                            })
+                          }
+                          className="text-[11px] font-bold text-red-600 hover:underline cursor-pointer"
+                        >
+                          <i className="fas fa-trash-alt mr-1"></i> Hapus
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEditingClass({
+                            ...editingClass,
+                            waliSignatureType: 'none',
+                          })
+                        }
+                        className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold border cursor-pointer ${
+                          !editingClass.waliSignatureType ||
+                          editingClass.waliSignatureType === 'none'
+                            ? 'bg-slate-800 text-white border-slate-800'
+                            : 'bg-white text-slate-700 border-slate-300'
+                        }`}
+                      >
+                        TTD Manual
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEditingClass({
+                            ...editingClass,
+                            waliSignatureType: 'signature',
+                          })
+                        }
+                        className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold border cursor-pointer ${
+                          editingClass.waliSignatureType === 'signature'
+                            ? 'bg-blue-600 text-white border-blue-600'
+                            : 'bg-white text-slate-700 border-slate-300'
+                        }`}
+                      >
+                        Scan TTD Wali
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEditingClass({
+                            ...editingClass,
+                            waliSignatureType: 'qrcode',
+                          })
+                        }
+                        className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold border cursor-pointer ${
+                          editingClass.waliSignatureType === 'qrcode'
+                            ? 'bg-emerald-600 text-white border-emerald-600'
+                            : 'bg-white text-slate-700 border-slate-300'
+                        }`}
+                      >
+                        QR Code Wali
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <label className="flex items-center justify-center gap-1.5 px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg cursor-pointer">
+                        <i className="fas fa-file-signature"></i>
+                        <span>Upload Scan TTD</span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          onChange={(e) =>
+                            handleUploadEditingClassWaliSigOrQr(e, 'signature')
+                          }
+                          className="hidden"
+                        />
+                      </label>
+                      <label className="flex items-center justify-center gap-1.5 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg cursor-pointer">
+                        <i className="fas fa-qrcode"></i>
+                        <span>Upload QR Code</span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          onChange={(e) =>
+                            handleUploadEditingClassWaliSigOrQr(e, 'qrcode')
+                          }
+                          className="hidden"
+                        />
+                      </label>
+                    </div>
+
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={editingClass.waliSignatureUrl || ''}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setEditingClass({
+                            ...editingClass,
+                            waliSignatureUrl: val,
+                            waliSignatureType:
+                              val &&
+                              (!editingClass.waliSignatureType ||
+                                editingClass.waliSignatureType === 'none')
+                                ? 'signature'
+                                : editingClass.waliSignatureType,
+                          });
+                        }}
+                        placeholder="Atau tempel URL gambar TTD / QR Code..."
+                        className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono outline-none focus:border-blue-600"
+                      />
+                      {editingClass.waliSignatureUrl &&
+                        editingClass.waliSignatureType === 'signature' && (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                const cleaned =
+                                  await removeWhiteBackgroundFromDataUrl(
+                                    editingClass.waliSignatureUrl!
+                                  );
+                                setEditingClass({
+                                  ...editingClass,
+                                  waliSignatureUrl: cleaned,
+                                });
+                                showToast(
+                                  'Background putih Scan TTD Wali Kelas berhasil dibuat transparan!',
+                                  'success'
+                                );
+                              } catch {
+                                showToast(
+                                  'Gagal memproses background gambar.',
+                                  'danger'
+                                );
+                              }
+                            }}
+                            className="px-2.5 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-lg text-[11px] font-bold cursor-pointer whitespace-nowrap"
+                          >
+                            <i className="fas fa-magic mr-1 text-blue-600"></i>
+                            Transparankan BG
+                          </button>
+                        )}
+                    </div>
+
+                    {/* Preview Wali Kelas Signature */}
+                    <div className="bg-white rounded-lg border border-slate-200 p-3 text-center">
+                      <div className="text-[10px] font-bold uppercase text-slate-400 mb-1">
+                        Preview Tanda Tangan Wali Kelas di Raport
+                      </div>
+                      <div
+                        style={{
+                          fontFamily: "'Times New Roman', Times, serif",
+                          fontSize: '9.5pt',
+                          color: '#000',
+                        }}
+                      >
+                        <p className="mb-0">{school.datePrint}</p>
+                        <p className="mb-0">Wali Kelas,</p>
+                        {editingClass.waliSignatureType &&
+                        editingClass.waliSignatureType !== 'none' &&
+                        editingClass.waliSignatureUrl ? (
+                          <div className="h-12 flex items-center justify-center my-1">
+                            <img
+                              src={editingClass.waliSignatureUrl}
+                              alt="Preview TTD/QR Wali"
+                              className={
+                                editingClass.waliSignatureType === 'qrcode'
+                                  ? 'w-11 h-11 object-contain mx-auto'
+                                  : 'max-h-11 max-w-[150px] object-contain mx-auto'
+                              }
+                            />
+                          </div>
+                        ) : (
+                          <div className="h-10 flex items-center justify-center text-[11px] font-sans text-slate-400 italic">
+                            (Ruang Tanda Tangan Manual)
+                          </div>
+                        )}
+                        <p className="font-bold underline mb-0">
+                          {formatTeacherNameWithTitle(
+                            editingClass.waliKelasName
+                          )}
+                        </p>
+                        {formatNipOrNuptk(editingClass.waliKelasNip)
+                          .formatted && (
+                          <p className="mb-0" style={{ fontSize: '8.5pt' }}>
+                            {
+                              formatNipOrNuptk(editingClass.waliKelasNip)
+                                .formatted
+                            }
+                          </p>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 </div>
                 <div className="px-5 py-3 bg-slate-50 border-t border-slate-200 flex justify-end gap-2">
@@ -6060,6 +6849,68 @@ export default function App() {
                           'Tanpa NIP/NUPTK (Ditampilkan Hanya Nama Guru)'}
                       </b>
                     </span>
+                  </div>
+
+                  {/* Upload Scan TTD / QR Code Wali Kelas saat Tambah Kelas */}
+                  <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
+                    <label className="block text-xs font-bold text-slate-700">
+                      Opsional: Upload Scan TTD / QR Code Wali Kelas
+                    </label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <label className="flex items-center justify-center gap-1.5 px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg cursor-pointer">
+                        <i className="fas fa-file-signature"></i>
+                        <span>Upload Scan TTD</span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          onChange={(e) =>
+                            handleUploadNewClassWaliSigOrQr(e, 'signature')
+                          }
+                          className="hidden"
+                        />
+                      </label>
+                      <label className="flex items-center justify-center gap-1.5 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg cursor-pointer">
+                        <i className="fas fa-qrcode"></i>
+                        <span>Upload QR Code</span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          onChange={(e) =>
+                            handleUploadNewClassWaliSigOrQr(e, 'qrcode')
+                          }
+                          className="hidden"
+                        />
+                      </label>
+                    </div>
+                    {newClass.waliSignatureUrl && (
+                      <div className="flex items-center justify-between bg-white p-2 rounded border border-slate-200">
+                        <div className="flex items-center gap-2">
+                          <img
+                            src={newClass.waliSignatureUrl}
+                            alt="Preview"
+                            className="h-8 w-auto object-contain"
+                          />
+                          <span className="text-xs font-bold text-emerald-700">
+                            {newClass.waliSignatureType === 'qrcode'
+                              ? 'QR Code Siap'
+                              : 'Scan TTD Siap'}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setNewClass({
+                              ...newClass,
+                              waliSignatureType: 'none',
+                              waliSignatureUrl: '',
+                            })
+                          }
+                          className="text-xs text-red-600 font-bold cursor-pointer"
+                        >
+                          Hapus
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
                 <div className="px-5 py-3 bg-slate-50 border-t border-slate-200 flex justify-end gap-2">

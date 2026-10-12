@@ -462,7 +462,50 @@ export const RaportTemplate: React.FC<RaportTemplateProps> = ({
             >
               <p className="mb-0">{school.datePrint}</p>
               <p className="mb-0">Wali Kelas,</p>
-              <div style={{ height: '40px' }}></div>
+              {classInfo.waliSignatureType &&
+              classInfo.waliSignatureType !== 'none' &&
+              classInfo.waliSignatureUrl ? (
+                <div
+                  style={{
+                    height: '46px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    margin: '1px auto',
+                  }}
+                >
+                  <img
+                    src={classInfo.waliSignatureUrl}
+                    alt={
+                      classInfo.waliSignatureType === 'qrcode'
+                        ? 'QR Code Wali Kelas'
+                        : 'TTD Wali Kelas'
+                    }
+                    className="sig-qr-img"
+                    style={
+                      classInfo.waliSignatureType === 'qrcode'
+                        ? {
+                            width: '44px',
+                            height: '44px',
+                            objectFit: 'contain',
+                            display: 'block',
+                            margin: '0 auto',
+                          }
+                        : {
+                            maxHeight: '44px',
+                            maxWidth: '160px',
+                            width: 'auto',
+                            height: 'auto',
+                            objectFit: 'contain',
+                            display: 'block',
+                            margin: '0 auto',
+                          }
+                    }
+                  />
+                </div>
+              ) : (
+                <div style={{ height: '42px' }}></div>
+              )}
               {formattedWaliName !== '-' && (
                 <p
                   className={`font-bold mb-0 ${
@@ -490,7 +533,50 @@ export const RaportTemplate: React.FC<RaportTemplateProps> = ({
             >
               <p className="mb-0">Mengetahui,</p>
               <p className="font-bold mb-0">Kepala SMKN 1 Mesuji Timur</p>
-              <div style={{ height: '44px' }}></div>
+              {school.principalSignatureType &&
+              school.principalSignatureType !== 'none' &&
+              school.principalSignatureUrl ? (
+                <div
+                  style={{
+                    height: '48px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    margin: '1px auto',
+                  }}
+                >
+                  <img
+                    src={school.principalSignatureUrl}
+                    alt={
+                      school.principalSignatureType === 'qrcode'
+                        ? 'QR Code Kepala Sekolah'
+                        : 'TTD Kepala Sekolah'
+                    }
+                    className="sig-qr-img"
+                    style={
+                      school.principalSignatureType === 'qrcode'
+                        ? {
+                            width: '46px',
+                            height: '46px',
+                            objectFit: 'contain',
+                            display: 'block',
+                            margin: '0 auto',
+                          }
+                        : {
+                            maxHeight: '46px',
+                            maxWidth: '170px',
+                            width: 'auto',
+                            height: 'auto',
+                            objectFit: 'contain',
+                            display: 'block',
+                            margin: '0 auto',
+                          }
+                    }
+                  />
+                </div>
+              ) : (
+                <div style={{ height: '44px' }}></div>
+              )}
               {formattedPrincipalName !== '-' && (
                 <p
                   className={`font-bold mb-0 ${

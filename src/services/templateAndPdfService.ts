@@ -827,6 +827,146 @@ export async function resolveAndTrimKopImage(
   return null;
 }
 
+export async function processUploadedSignatureOrQrImage(
+  file: File,
+  mode: 'signature' | 'qrcode',
+  removeWhiteBg: boolean = mode === 'signature'
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const rawW = img.naturalWidth || img.width;
+        const rawH = img.naturalHeight || img.height;
+        if (!rawW || !rawH) {
+          URL.revokeObjectURL(objectUrl);
+          reject(new Error('Ukuran gambar tidak valid.'));
+          return;
+        }
+
+        const maxW = mode === 'qrcode' ? 200 : 340;
+        const maxH = mode === 'qrcode' ? 200 : 150;
+        const scale = Math.min(1, maxW / rawW, maxH / rawH);
+        const targetW = Math.max(1, Math.round(rawW * scale));
+        const targetH = Math.max(1, Math.round(rawH * scale));
+
+        const canvas = document.createElement('canvas');
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          URL.revokeObjectURL(objectUrl);
+          reject(new Error('Gagal memproses canvas gambar.'));
+          return;
+        }
+
+        ctx.clearRect(0, 0, targetW, targetH);
+        ctx.drawImage(img, 0, 0, targetW, targetH);
+        URL.revokeObjectURL(objectUrl);
+
+        if (removeWhiteBg && mode === 'signature') {
+          const imageData = ctx.getImageData(0, 0, targetW, targetH);
+          const data = imageData.data;
+          for (let i = 0; i < data.length; i += 4) {
+            const r = data[i];
+            const g = data[i + 1];
+            const b = data[i + 2];
+            const a = data[i + 3];
+            if (a > 0) {
+              const brightness = (r + g + b) / 3;
+              if (r > 230 && g > 230 && b > 230) {
+                data[i + 3] = 0;
+              } else if (brightness > 210) {
+                // Smooth anti-aliased edge transition
+                data[i + 3] = Math.round(((240 - brightness) / 30) * a);
+              }
+            }
+          }
+          ctx.putImageData(imageData, 0, 0);
+        }
+
+        let dataUrl = canvas.toDataURL('image/png');
+        // Ensure compact size (< 42,000 chars) so it always fits inside a single Google Sheets cell
+        if (dataUrl.length > 42000) {
+          const smallerScale = 0.72;
+          const smallCanvas = document.createElement('canvas');
+          smallCanvas.width = Math.max(1, Math.round(targetW * smallerScale));
+          smallCanvas.height = Math.max(1, Math.round(targetH * smallerScale));
+          const sCtx = smallCanvas.getContext('2d');
+          if (sCtx) {
+            sCtx.drawImage(
+              canvas,
+              0,
+              0,
+              smallCanvas.width,
+              smallCanvas.height
+            );
+            dataUrl = smallCanvas.toDataURL('image/png');
+          }
+        }
+
+        resolve(dataUrl);
+      } catch (err) {
+        URL.revokeObjectURL(objectUrl);
+        reject(err);
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error('Gagal membaca file gambar.'));
+    };
+    img.src = objectUrl;
+  });
+}
+
+export async function removeWhiteBackgroundFromDataUrl(
+  srcDataUrl: string
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      try {
+        const w = img.naturalWidth || img.width;
+        const h = img.naturalHeight || img.height;
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(srcDataUrl);
+          return;
+        }
+        ctx.clearRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
+        const imageData = ctx.getImageData(0, 0, w, h);
+        const data = imageData.data;
+        for (let i = 0; i < data.length; i += 4) {
+          const r = data[i];
+          const g = data[i + 1];
+          const b = data[i + 2];
+          const a = data[i + 3];
+          if (a > 0) {
+            const brightness = (r + g + b) / 3;
+            if (r > 228 && g > 228 && b > 228) {
+              data[i + 3] = 0;
+            } else if (brightness > 208) {
+              data[i + 3] = Math.round(((238 - brightness) / 30) * a);
+            }
+          }
+        }
+        ctx.putImageData(imageData, 0, 0);
+        resolve(canvas.toDataURL('image/png'));
+      } catch (e) {
+        reject(e);
+      }
+    };
+    img.onerror = () => reject(new Error('Gagal memuat gambar untuk diproses.'));
+    img.src = srcDataUrl;
+  });
+}
+
 export async function generateAndDownloadPdf(
   containerElement: HTMLElement,
   filename: string
@@ -842,7 +982,7 @@ export async function generateAndDownloadPdf(
   const fixStyle = document.createElement('style');
   fixStyle.id = 'h2c-baseline-fix-style';
   fixStyle.textContent = `
-    img:not(.kop-img) {
+    img:not(.kop-img):not(.sig-qr-img) {
       display: inline !important;
       vertical-align: baseline !important;
     }
@@ -852,6 +992,11 @@ export async function generateAndDownloadPdf(
       max-width: 100% !important;
       height: auto !important;
       object-fit: fill !important;
+    }
+    .sig-qr-img {
+      display: block !important;
+      margin: 0 auto !important;
+      object-fit: contain !important;
     }
   `;
   document.head.appendChild(fixStyle);
@@ -906,6 +1051,19 @@ export async function generateAndDownloadPdf(
           await new Promise<void>((res) => {
             kopImg.onload = () => res();
             kopImg.onerror = () => res();
+          });
+        }
+      }
+
+      // Ensure any signature / QR code images (.sig-qr-img) are loaded
+      const sigImgs = Array.from(
+        clonedEl.querySelectorAll<HTMLImageElement>('img.sig-qr-img')
+      );
+      for (const sigImg of sigImgs) {
+        if (!sigImg.complete) {
+          await new Promise<void>((res) => {
+            sigImg.onload = () => res();
+            sigImg.onerror = () => res();
           });
         }
       }
@@ -998,4 +1156,5 @@ export async function generateAndDownloadPdf(
     fixStyle.remove();
   }
 }
+
 
