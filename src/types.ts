@@ -25,6 +25,7 @@ export interface SchoolData {
   datePrint: string;
   principalSignatureType?: SignatureDisplayType;
   principalSignatureUrl?: string;
+  gradeInputOpen?: boolean;
 }
 
 export interface ClassItem {
@@ -98,6 +99,7 @@ export const DEFAULT_SCHOOL: SchoolData = {
   datePrint: 'Mesuji Timur, Oktober 2026',
   principalSignatureType: 'none',
   principalSignatureUrl: '',
+  gradeInputOpen: true,
 };
 
 export const DEFAULT_CLASSES: ClassItem[] = [

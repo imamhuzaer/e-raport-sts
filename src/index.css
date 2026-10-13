@@ -179,3 +179,32 @@
   }
 }
 
+.leger-print-page {
+  display: none;
+}
+
+@media print {
+  body.printing-leger .print-only-container {
+    display: none !important;
+  }
+  body.printing-leger .leger-print-page {
+    display: block !important;
+    width: 297mm !important;
+    min-height: 210mm !important;
+    padding: 6mm 8mm !important;
+    margin: 0 auto !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+    font-family: 'Times New Roman', Times, serif !important;
+    box-sizing: border-box !important;
+  }
+  body.printing-leger table {
+    border-collapse: collapse !important;
+    width: 100% !important;
+  }
+  body.printing-leger th,
+  body.printing-leger td {
+    border: 1px solid #000000 !important;
+  }
+}
+

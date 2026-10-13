@@ -389,6 +389,10 @@ function parseSheetTabsToDatabase(
       datePrint: kv['datePrint'] || DEFAULT_SCHOOL.datePrint,
       principalSignatureType,
       principalSignatureUrl: kv['principalSignatureUrl'] || '',
+      gradeInputOpen:
+        kv['gradeInputOpen'] !== undefined
+          ? kv['gradeInputOpen'].trim().toLowerCase() !== 'false'
+          : true,
     };
     if (kv['gasBridgeUrl'] && !getSavedGasBridgeUrl()) {
       saveGasBridgeUrl(kv['gasBridgeUrl']);
@@ -1109,6 +1113,7 @@ function buildSheetTabularValues(payload: DatabasePayload) {
     ['datePrint', payload.school.datePrint],
     ['principalSignatureType', payload.school.principalSignatureType || 'none'],
     ['principalSignatureUrl', payload.school.principalSignatureUrl || ''],
+    ['gradeInputOpen', payload.school.gradeInputOpen !== false ? 'true' : 'false'],
     ...(savedGasUrl ? [['gasBridgeUrl', savedGasUrl]] : []),
   ];
 

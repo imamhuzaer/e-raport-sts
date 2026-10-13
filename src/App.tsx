@@ -39,6 +39,7 @@ import {
   saveActiveSpreadsheetLink,
   saveGasBridgeUrl,
   saveLocalDatabaseCache,
+  sanitizeDatabasePayload,
   SheetMetadataInfo,
   syncAllToGoogleSheets,
 } from './services/sheetsDatabase';
@@ -63,6 +64,7 @@ import {
 } from './services/templateAndPdfService';
 import { RaportTemplate } from './components/RaportTemplate';
 import { GoogleSignInButton } from './components/GoogleSignInButton';
+import { LegerTableModal } from './components/LegerTableModal';
 
 interface PendingSheetMutation {
   title: string;
@@ -287,6 +289,10 @@ export default function App() {
     useState<RankedStudentItem | null>(null);
   const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
   const previewContainerRef = useRef<HTMLDivElement | null>(null);
+
+  // Leger Nilai Modal State
+  const [showLegerModal, setShowLegerModal] = useState(false);
+  const [legerTargetClass, setLegerTargetClass] = useState<string>('');
 
   // Mandatory Confirmation Dialog State for Mutating/Destructive Operations
   const [pendingMutation, setPendingMutation] =
@@ -1943,6 +1949,91 @@ export default function App() {
   };
 
   const activeWaliClassInfo = getClassInfo(waliSelectedClass);
+
+  const handleToggleGradeInputAccess = () => {
+    const currentStatus = school.gradeInputOpen !== false;
+    const nextStatus = !currentStatus;
+    const updatedSchool: SchoolData = {
+      ...school,
+      gradeInputOpen: nextStatus,
+    };
+    setSchool(updatedSchool);
+    const updatedPayload = sanitizeDatabasePayload({
+      school: updatedSchool,
+      classes,
+      students,
+      users,
+      studentGrades,
+    });
+    saveLocalDatabaseCache(updatedPayload);
+    showToast(
+      nextStatus
+        ? 'Akses input nilai oleh Guru Mata Pelajaran berhasil DIBUKA!'
+        : 'Akses input nilai oleh Guru Mata Pelajaran berhasil DITUTUP (Terkunci)!',
+      nextStatus ? 'success' : 'danger'
+    );
+  };
+
+  const handleOpenLegerModal = (targetClass?: string) => {
+    setLegerTargetClass(targetClass || waliSelectedClass);
+    setShowLegerModal(true);
+  };
+
+  const targetLegerClass = legerTargetClass || waliSelectedClass;
+  const legerClassObj = useMemo<ClassItem>(() => {
+    const found = classes.find(
+      (c) => normalizeClassKey(c.name) === normalizeClassKey(targetLegerClass)
+    );
+    const resolved = getClassInfo(targetLegerClass);
+    return {
+      id: found?.id || 1,
+      name: found?.name || targetLegerClass,
+      grade: found?.grade || '10',
+      major: found?.major || 'Teknik Kendaraan Ringan',
+      waliKelasName: resolved.waliKelasName || '-',
+      waliKelasNip: resolved.waliKelasNip || '-',
+      waliSignatureType: resolved.waliSignatureType || 'none',
+      waliSignatureUrl: resolved.waliSignatureUrl || '',
+    };
+  }, [classes, targetLegerClass, users, currentUser]);
+
+  const legerClassStudents = useMemo<RankedStudentItem[]>(() => {
+    const normTarget = normalizeClassKey(targetLegerClass);
+    const stsInCls = students.filter(
+      (s) => normalizeClassKey(s.className) === normTarget
+    );
+    const mapped = stsInCls.map((s) => {
+      const gradesObj = studentGrades[s.id] || {};
+      const scores = Object.values(gradesObj).filter(
+        (val): val is number => typeof val === 'number' && !Number.isNaN(val)
+      );
+      const sum = scores.reduce((a, b) => a + b, 0);
+      const avg =
+        scores.length > 0 ? Number((sum / scores.length).toFixed(2)) : 0;
+      return {
+        ...s,
+        totalScore: sum,
+        avgScore: avg,
+        rank: 0,
+      };
+    });
+    const sorted = [...mapped].sort((a, b) => b.avgScore - a.avgScore);
+    return sorted.map((s, idx) => ({
+      ...s,
+      rank: idx + 1,
+    }));
+  }, [students, studentGrades, targetLegerClass]);
+
+  const availableSubjectsForLeger = useMemo(() => {
+    const grade = legerClassObj.grade || '10';
+    const template = subjectTemplates[grade] || subjectTemplates['10'];
+    const list: Array<{ name: string; category: string }> = [];
+    template.umum.forEach((s) => list.push({ name: s.name, category: 'Umum' }));
+    template.kejuruan.forEach((s) =>
+      list.push({ name: s.name, category: 'Kejuruan' })
+    );
+    return list;
+  }, [legerClassObj, subjectTemplates]);
 
   // Comprehensive Visual Statistics for Admin Dashboard
   const adminStats = useMemo(() => {
@@ -3957,6 +4048,79 @@ export default function App() {
                 {/* TAB: INPUT NILAI MASSAL SEMUA MAPEL PER KELAS (KHUSUS ADMIN) */}
                 {adminTab === 'nilai' && (
                   <div className="space-y-5">
+                    {/* Kontrol Akses Buka / Tutup Input Nilai Guru Mapel */}
+                    <div
+                      className={`p-4 rounded-xl border flex flex-wrap items-center justify-between gap-4 ${
+                        school.gradeInputOpen !== false
+                          ? 'bg-emerald-50/80 border-emerald-200 text-emerald-950'
+                          : 'bg-rose-50/80 border-rose-200 text-rose-950'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div
+                          className={`w-11 h-11 rounded-xl flex items-center justify-center text-lg text-white shadow-sm shrink-0 ${
+                            school.gradeInputOpen !== false
+                              ? 'bg-emerald-600'
+                              : 'bg-rose-600'
+                          }`}
+                        >
+                          <i
+                            className={`fas ${
+                              school.gradeInputOpen !== false
+                                ? 'fa-lock-open'
+                                : 'fa-lock'
+                            }`}
+                          ></i>
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <h6 className="font-bold text-sm mb-0">
+                              Status Akses Input Nilai Guru Mapel:
+                            </h6>
+                            <span
+                              className={`px-2.5 py-0.5 rounded-full text-xs font-extrabold uppercase ${
+                                school.gradeInputOpen !== false
+                                  ? 'bg-emerald-200 text-emerald-900 border border-emerald-300'
+                                  : 'bg-rose-200 text-rose-900 border border-rose-300'
+                              }`}
+                            >
+                              {school.gradeInputOpen !== false
+                                ? 'DIBUKA (Aktif)'
+                                : 'DITUTUP (Terkunci)'}
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-600 mb-0 mt-0.5">
+                            {school.gradeInputOpen !== false
+                              ? 'Guru Mata Pelajaran saat ini DAPAT menginput, mengedit, mengimpor, dan menyimpan nilai STS siswa.'
+                              : 'Penginputan nilai oleh Guru Mata Pelajaran sedang DITUTUP. Guru hanya dapat melihat nilai (mode read-only).'}
+                          </p>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={handleToggleGradeInputAccess}
+                        className={`px-4 py-2.5 rounded-lg text-xs font-bold text-white transition-all cursor-pointer flex items-center gap-2 shadow-sm ${
+                          school.gradeInputOpen !== false
+                            ? 'bg-rose-600 hover:bg-rose-700'
+                            : 'bg-emerald-600 hover:bg-emerald-700'
+                        }`}
+                      >
+                        <i
+                          className={`fas ${
+                            school.gradeInputOpen !== false
+                              ? 'fa-lock'
+                              : 'fa-lock-open'
+                          }`}
+                        ></i>
+                        <span>
+                          {school.gradeInputOpen !== false
+                            ? 'Tutup / Kunci Input Nilai Guru'
+                            : 'Buka Akses Input Nilai Guru'}
+                        </span>
+                      </button>
+                    </div>
+
                     <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
                       <div className="flex flex-wrap items-center justify-between border-b border-slate-200 pb-4 mb-4 gap-4">
                         <div>
@@ -3976,6 +4140,17 @@ export default function App() {
                         </div>
 
                         <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleOpenLegerModal(adminGradeSelectedClass)
+                            }
+                            className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg transition-colors cursor-pointer flex items-center gap-1.5 shadow-sm"
+                            title="Buka dan cetak buku leger nilai lengkap kelas ini"
+                          >
+                            <i className="fas fa-table mr-1"></i> Buka / Cetak
+                            Leger ({adminGradeSelectedClass})
+                          </button>
                           <button
                             type="button"
                             onClick={() =>
@@ -4052,6 +4227,16 @@ export default function App() {
                         </div>
 
                         <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleOpenLegerModal(adminGradeSelectedClass)
+                            }
+                            className="px-3.5 py-2 border border-indigo-600 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold text-xs rounded-lg transition-colors cursor-pointer flex items-center gap-1.5"
+                          >
+                            <i className="fas fa-file-invoice mr-1 text-indigo-600"></i>
+                            Buku Leger ({adminGradeSelectedClass})
+                          </button>
                           <button
                             type="button"
                             onClick={fillAdminAllSubjectsRandomGrades}
@@ -4303,6 +4488,65 @@ export default function App() {
                           }
                           className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm outline-none focus:border-blue-600"
                         />
+                      </div>
+
+                      {/* PENGATURAN AKSES INPUT NILAI GURU MATA PELAJARAN */}
+                      <div className="md:col-span-2 p-4 rounded-xl bg-slate-50 border border-slate-200">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div>
+                            <label className="block text-xs font-bold text-slate-800 mb-0.5">
+                              <i className="fas fa-lock mr-1.5 text-blue-600"></i>
+                              Status Akses Input Nilai Guru Mata Pelajaran
+                            </label>
+                            <p className="text-xs text-slate-500 mb-0">
+                              Buka atau tutup izin bagi Guru Mapel untuk menginput, mengubah, mengimpor, dan menyimpan nilai STS siswa.
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSchool((prev) => ({
+                                  ...prev,
+                                  gradeInputOpen: true,
+                                }));
+                                showToast(
+                                  'Akses input nilai Guru Mapel diatur: DIBUKA',
+                                  'success'
+                                );
+                              }}
+                              className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                                school.gradeInputOpen !== false
+                                  ? 'bg-emerald-600 text-white shadow-sm'
+                                  : 'bg-white text-slate-600 border border-slate-300 hover:bg-slate-100'
+                              }`}
+                            >
+                              <i className="fas fa-lock-open"></i>
+                              <span>DIBUKA (Aktif)</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSchool((prev) => ({
+                                  ...prev,
+                                  gradeInputOpen: false,
+                                }));
+                                showToast(
+                                  'Akses input nilai Guru Mapel diatur: DITUTUP (Terkunci)',
+                                  'danger'
+                                );
+                              }}
+                              className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                                school.gradeInputOpen === false
+                                  ? 'bg-rose-600 text-white shadow-sm'
+                                  : 'bg-white text-slate-600 border border-slate-300 hover:bg-slate-100'
+                              }`}
+                            >
+                              <i className="fas fa-lock"></i>
+                              <span>DITUTUP (Terkunci)</span>
+                            </button>
+                          </div>
+                        </div>
                       </div>
 
                       {/* URL LOGO APLIKASI / SEKOLAH */}
@@ -5666,12 +5910,54 @@ export default function App() {
             {/* ================= ROLE: GURU MAPEL ================= */}
             {activeRole === 'gurumapel' && (
               <div className="space-y-6">
+                {/* Warning Banner Saat Input Nilai Ditutup oleh Admin */}
+                {school.gradeInputOpen === false && (
+                  <div className="bg-rose-50 border-l-4 border-rose-500 p-4 rounded-r-xl text-rose-950 shadow-sm flex items-start gap-3.5">
+                    <div className="w-10 h-10 rounded-xl bg-rose-600 text-white flex items-center justify-center shrink-0 shadow-sm mt-0.5">
+                      <i className="fas fa-lock text-base"></i>
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2 mb-0.5">
+                        <h6 className="font-bold text-sm text-rose-900 mb-0">
+                          Akses Input Nilai Sedang DITUTUP oleh Administrator
+                        </h6>
+                        <span className="px-2 py-0.5 rounded-full bg-rose-200 text-rose-900 text-[10px] font-extrabold uppercase tracking-wider border border-rose-300">
+                          Read-Only Mode
+                        </span>
+                      </div>
+                      <p className="text-xs text-rose-800 mb-0 leading-relaxed">
+                        Administrator telah <b>mengunci / menutup</b> penginputan nilai untuk Guru Mata Pelajaran. Saat ini Anda berada dalam mode <b>Hanya Lihat (Read-Only)</b>. Anda tetap dapat meninjau data nilai siswa dan mengunduh format template, namun pengisian nilai, perubahan angka, impor Excel, dan tombol simpan dinonaktifkan.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
                 <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 flex flex-wrap justify-between items-center gap-4">
                   <div>
-                    <div className="text-xs font-semibold text-blue-600 mb-1">
-                      Portal Guru Mata Pelajaran
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-semibold text-blue-600">
+                        Portal Guru Mata Pelajaran
+                      </span>
+                      <span
+                        className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
+                          school.gradeInputOpen !== false
+                            ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                            : 'bg-rose-100 text-rose-800 border border-rose-300'
+                        }`}
+                      >
+                        <i
+                          className={`fas ${
+                            school.gradeInputOpen !== false
+                              ? 'fa-lock-open'
+                              : 'fa-lock'
+                          } text-[10px]`}
+                        ></i>
+                        {school.gradeInputOpen !== false
+                          ? 'Input Nilai DIBUKA'
+                          : 'Input Nilai DITUTUP'}
+                      </span>
                     </div>
-                    <h4 className="font-bold text-xl text-slate-900 mb-1">
+                    <h4 className="font-bold text-xl text-slate-900 mb-1 mt-0.5">
                       Input Nilai Sumatif Tengah Semester (STS) Per Mata
                       Pelajaran
                     </h4>
@@ -5701,11 +5987,17 @@ export default function App() {
                     </button>
                     <button
                       type="button"
+                      disabled={school.gradeInputOpen === false}
                       onClick={() => {
                         setBulkModalType('nilai');
                         setBulkPasteText('');
                       }}
-                      className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg transition-colors cursor-pointer whitespace-nowrap"
+                      className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-bold rounded-lg transition-colors cursor-pointer whitespace-nowrap"
+                      title={
+                        school.gradeInputOpen === false
+                          ? 'Input nilai sedang dikunci oleh admin'
+                          : 'Impor nilai dari Excel/Copy-Paste'
+                      }
                     >
                       <i className="fas fa-file-import mr-1.5"></i> Impor Nilai
                       Mapel Ini
@@ -5751,8 +6043,14 @@ export default function App() {
                     <div className="md:col-span-3">
                       <button
                         type="button"
+                        disabled={school.gradeInputOpen === false}
                         onClick={fillRandomGrades}
-                        className="w-full py-2 px-3 border border-slate-300 hover:bg-slate-100 text-slate-700 font-bold text-xs rounded-lg transition-colors cursor-pointer"
+                        className="w-full py-2 px-3 border border-slate-300 hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed text-slate-700 font-bold text-xs rounded-lg transition-colors cursor-pointer"
+                        title={
+                          school.gradeInputOpen === false
+                            ? 'Input nilai sedang dikunci oleh admin'
+                            : 'Isi sample nilai otomatis'
+                        }
                       >
                         <i className="fas fa-magic mr-1.5"></i> Isian Otomatis
                         Sample
@@ -5765,19 +6063,40 @@ export default function App() {
                 <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
                   <div className="flex flex-wrap justify-between items-center border-b border-slate-200 pb-4 mb-4 gap-3">
                     <div>
-                      <h5 className="font-bold text-base text-slate-900 mb-0">
-                        Input Nilai - {guruSelectedClass}
-                      </h5>
+                      <div className="flex items-center gap-2">
+                        <h5 className="font-bold text-base text-slate-900 mb-0">
+                          Input Nilai - {guruSelectedClass}
+                        </h5>
+                        {school.gradeInputOpen === false && (
+                          <span className="px-2 py-0.5 bg-rose-100 text-rose-800 border border-rose-300 rounded text-[11px] font-bold">
+                            <i className="fas fa-lock mr-1"></i> Terkunci
+                          </span>
+                        )}
+                      </div>
                       <div className="text-blue-600 font-semibold text-xs mt-0.5">
                         Mata Pelajaran: {guruSelectedSubject}
                       </div>
                     </div>
                     <button
                       type="button"
+                      disabled={school.gradeInputOpen === false}
                       onClick={handleSaveGrades}
-                      className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer"
+                      className={`px-5 py-2.5 font-bold text-xs rounded-lg transition-colors flex items-center gap-1.5 ${
+                        school.gradeInputOpen === false
+                          ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                          : 'bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer shadow-sm'
+                      }`}
                     >
-                      <i className="fas fa-save mr-1.5"></i> Simpan Semua Nilai
+                      <i
+                        className={`fas ${
+                          school.gradeInputOpen === false ? 'fa-lock' : 'fa-save'
+                        }`}
+                      ></i>
+                      <span>
+                        {school.gradeInputOpen === false
+                          ? 'Input Nilai Dikunci'
+                          : 'Simpan Semua Nilai'}
+                      </span>
                     </button>
                   </div>
 
@@ -5827,6 +6146,7 @@ export default function App() {
                                     type="number"
                                     min={0}
                                     max={100}
+                                    disabled={school.gradeInputOpen === false}
                                     value={isFilled ? val : ''}
                                     onChange={(e) =>
                                       handleGradeChange(
@@ -5836,7 +6156,11 @@ export default function App() {
                                       )
                                     }
                                     placeholder="0"
-                                    className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-center font-bold font-mono text-slate-900 outline-none focus:border-blue-600"
+                                    className={`w-full px-3 py-1.5 border rounded-lg text-center font-bold font-mono outline-none ${
+                                      school.gradeInputOpen === false
+                                        ? 'bg-slate-100 border-slate-200 text-slate-500 cursor-not-allowed'
+                                        : 'bg-white border-slate-300 text-slate-900 focus:border-blue-600'
+                                    }`}
                                   />
                                 </td>
                                 <td className="py-3 px-4 text-center">
@@ -5964,6 +6288,15 @@ export default function App() {
                   <div className="flex flex-wrap gap-2">
                     <button
                       type="button"
+                      onClick={() => handleOpenLegerModal(waliSelectedClass)}
+                      className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer flex items-center gap-1.5 shadow-sm"
+                      title="Buka tampilan leger nilai lengkap kelas, export Excel dan cetak format landscape"
+                    >
+                      <i className="fas fa-table mr-1"></i> Cetak / Export Leger
+                      ({waliSelectedClass})
+                    </button>
+                    <button
+                      type="button"
                       onClick={handleSaveWaliData}
                       className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer"
                     >
@@ -5984,10 +6317,21 @@ export default function App() {
                 {/* Student Grades & Attendance Table */}
                 <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
                   <div className="flex flex-wrap justify-between items-center border-b border-slate-200 pb-3 mb-4 gap-2">
-                    <h5 className="font-bold text-base text-slate-900 mb-0">
-                      <i className="fas fa-table text-blue-600 mr-2"></i> Leger
-                      Nilai & Kehadiran
-                    </h5>
+                    <div className="flex items-center gap-3">
+                      <h5 className="font-bold text-base text-slate-900 mb-0">
+                        <i className="fas fa-table text-blue-600 mr-2"></i> Rekap
+                        Nilai & Kehadiran Siswa
+                      </h5>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenLegerModal(waliSelectedClass)}
+                        className="px-3 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center gap-1.5 shadow-xs"
+                        title="Buka buku leger nilai lengkap kelas ini"
+                      >
+                        <i className="fas fa-file-invoice text-indigo-600"></i>
+                        <span>Cetak Leger Kelas</span>
+                      </button>
+                    </div>
                     <span className="text-xs text-slate-500">
                       Klik tombol <b>Preview / PDF</b> pada siswa untuk melihat
                       dan mengunduh file PDF raport A4.
@@ -7280,6 +7624,17 @@ export default function App() {
               </div>
             </div>
           )}
+
+          {/* MODAL: BUKU LEGER NILAI LENGKAP & PRINT LANDSCAPE */}
+          <LegerTableModal
+            isOpen={showLegerModal}
+            onClose={() => setShowLegerModal(false)}
+            school={school}
+            classInfo={legerClassObj}
+            students={legerClassStudents}
+            subjects={availableSubjectsForLeger}
+            grades={studentGrades}
+          />
 
           {/* DEDICATED PRINT-ONLY CONTAINER FOR EXACT A4 PAGINATION */}
           <div className="print-only-container">

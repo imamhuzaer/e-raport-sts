@@ -3,9 +3,12 @@ import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
 import {
   ClassItem,
+  RankedStudentItem,
   RoleType,
+  SchoolData,
   StudentGradesMap,
   StudentItem,
+  SubjectItem,
   UserAccount,
 } from '../types';
 
@@ -315,6 +318,362 @@ export function downloadGradesTemplate(
       `Template_Leger_Nilai_${className.replace(/\s+/g, '_')}.xlsx`
     );
   }
+}
+
+/**
+ * Common abbreviations for standard subjects to keep Leger table headers clean and readable.
+ */
+export function getSubjectAbbreviation(name: string): string {
+  if (!name) return '-';
+  const clean = name.trim();
+  const lower = clean.toLowerCase();
+  if (lower.includes('agama') || lower.includes('budi pekerti')) return 'PABP';
+  if (lower.includes('pancasila') || lower.includes('kewarganegaraan')) return 'PPKn';
+  if (lower.includes('bahasa indonesia')) return 'B. Indo';
+  if (lower.includes('jasmani') || lower.includes('pjok') || lower.includes('olahraga')) return 'PJOK';
+  if (lower.includes('sejarah')) return 'Sejarah';
+  if (lower.includes('seni')) return 'Seni';
+  if (lower.includes('lampung')) return 'B. Lamp';
+  if (lower.includes('anti korupsi')) return 'PAK';
+  if (lower.includes('matematika')) return 'MTK';
+  if (lower.includes('bahasa inggris')) return 'B. Ing';
+  if (lower.includes('informatika')) return 'Informatika';
+  if (lower.includes('ipas') || lower.includes('ilmu pengetahuan alam')) return 'IPAS';
+  if (lower.includes('dasar program keahlian') || lower.includes('dpk')) return 'DPK';
+  if (lower.includes('kreativitas') || lower.includes('kik') || lower.includes('kewirausahaan')) return 'KIK';
+  if (lower.includes('konsentrasi keahlian')) return 'Konsentrasi';
+  if (lower.includes('pilihan')) return 'Pilihan';
+  if (clean.length > 14) {
+    const words = clean.split(/\s+/);
+    if (words.length >= 2) {
+      return words.map((w) => w[0]?.toUpperCase()).join('');
+    }
+    return clean.slice(0, 12);
+  }
+  return clean;
+}
+
+export function exportClassLegerToExcel(params: {
+  school: SchoolData;
+  classInfo: Partial<ClassItem>;
+  students: RankedStudentItem[];
+  allSubjects: Array<{ name: string; category: string }>;
+  grades: StudentGradesMap;
+}) {
+  const { school, classInfo, students, allSubjects, grades } = params;
+  const wb = XLSX.utils.book_new();
+
+  const titleRows: (string | number)[][] = [
+    ['PEMERINTAH PROVINSI LAMPUNG - DINAS PENDIDIKAN DAN KEBUDAYAAN'],
+    [`${school.name.toUpperCase()} - TAHUN PELAJARAN ${school.tp}`],
+    ['LEGER NILAI HASIL BELAJAR PESERTA DIDIK (SUMATIF TENGAH SEMESTER)'],
+    [
+      `Kelas: ${classInfo.name || '-'}`,
+      `Tingkat: Kelas ${classInfo.grade || '-'}`,
+      `Konsentrasi Keahlian: ${classInfo.major || '-'}`,
+      `Wali Kelas: ${formatTeacherNameWithTitle(classInfo.waliKelasName)}`,
+      `Semester: Ganjil`,
+    ],
+    [],
+  ];
+
+  const subjectNames = allSubjects.map((s) => s.name);
+  const subjectHeaders = allSubjects.map(
+    (s) => `${getSubjectAbbreviation(s.name)} [${s.category}]`
+  );
+
+  const tableHeaders = [
+    'No',
+    'NISN',
+    'NIS',
+    'Nama Peserta Didik',
+    ...subjectHeaders,
+    'Total Nilai',
+    'Rata-Rata',
+    'Peringkat',
+    'Sakit (S)',
+    'Izin (I)',
+    'Alpa (A)',
+    'Total Absen',
+    'Catatan Wali Kelas',
+  ];
+
+  const studentDataRows: (string | number)[][] = students.map((st, idx) => {
+    const stGrades = grades[st.id] || {};
+    const subScores = subjectNames.map((sub) => {
+      const v = stGrades[sub];
+      return v !== undefined && v !== null && !isNaN(Number(v)) ? Number(v) : '';
+    });
+    const s = st.attendance?.sakit || 0;
+    const i = st.attendance?.izin || 0;
+    const a = st.attendance?.alpa || 0;
+    const totalAbsen = s + i + a;
+
+    return [
+      idx + 1,
+      st.nisn,
+      st.nis,
+      st.name,
+      ...subScores,
+      st.totalScore,
+      st.avgScore,
+      st.rank,
+      s,
+      i,
+      a,
+      totalAbsen,
+      st.note || '',
+    ];
+  });
+
+  // Calculate subject statistics
+  const subjectAverages = subjectNames.map((sub) => {
+    const validScores: number[] = [];
+    students.forEach((st) => {
+      const v = grades[st.id]?.[sub];
+      if (v !== undefined && v !== null && !isNaN(Number(v)) && Number(v) > 0) {
+        validScores.push(Number(v));
+      }
+    });
+    if (validScores.length === 0) return 0;
+    return Number((validScores.reduce((a, b) => a + b, 0) / validScores.length).toFixed(1));
+  });
+
+  const subjectMaxs = subjectNames.map((sub) => {
+    let max = 0;
+    students.forEach((st) => {
+      const v = Number(grades[st.id]?.[sub] || 0);
+      if (v > max) max = v;
+    });
+    return max;
+  });
+
+  const subjectMins = subjectNames.map((sub) => {
+    const validScores: number[] = [];
+    students.forEach((st) => {
+      const v = grades[st.id]?.[sub];
+      if (v !== undefined && v !== null && !isNaN(Number(v)) && Number(v) > 0) {
+        validScores.push(Number(v));
+      }
+    });
+    return validScores.length > 0 ? Math.min(...validScores) : 0;
+  });
+
+  const avgTotal =
+    students.length > 0
+      ? Number((students.reduce((a, b) => a + b.totalScore, 0) / students.length).toFixed(1))
+      : 0;
+  const avgClass =
+    students.length > 0
+      ? Number((students.reduce((a, b) => a + b.avgScore, 0) / students.length).toFixed(1))
+      : 0;
+
+  const statAvgRow: (string | number)[] = [
+    '',
+    '',
+    '',
+    'RATA-RATA KELAS',
+    ...subjectAverages,
+    avgTotal,
+    avgClass,
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+  ];
+
+  const statMaxRow: (string | number)[] = [
+    '',
+    '',
+    '',
+    'NILAI TERTINGGI',
+    ...subjectMaxs,
+    Math.max(...students.map((s) => s.totalScore), 0),
+    Math.max(...students.map((s) => s.avgScore), 0),
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+  ];
+
+  const statMinRow: (string | number)[] = [
+    '',
+    '',
+    '',
+    'NILAI TERENDAH',
+    ...subjectMins,
+    Math.min(...students.map((s) => s.totalScore), 0),
+    Math.min(...students.map((s) => s.avgScore), 0),
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+  ];
+
+  const signatureRows: (string | number)[][] = [
+    [],
+    [],
+    ['', '', '', '', '', '', '', '', '', '', `${school.datePrint}`],
+    ['', '', '', 'Mengetahui,', '', '', '', '', '', '', 'Wali Kelas,'],
+    ['', '', '', 'Kepala Sekolah', '', '', '', '', '', '', ''],
+    [],
+    [],
+    [],
+    [
+      '',
+      '',
+      '',
+      formatTeacherNameWithTitle(school.principal),
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      formatTeacherNameWithTitle(classInfo.waliKelasName),
+    ],
+    [
+      '',
+      '',
+      '',
+      formatNipOrNuptk(school.principalNip).formatted || '-',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      formatNipOrNuptk(classInfo.waliKelasNip).formatted || '-',
+    ],
+    [],
+    ['© 2026 E-Raport STS SMK Negeri 1 Mesuji Timur - Desain & Sistem Dibuat oleh Imam Huzaer, S.Pd.'],
+  ];
+
+  const fullSheetData: (string | number)[][] = [
+    ...titleRows,
+    tableHeaders,
+    ...studentDataRows,
+    statAvgRow,
+    statMaxRow,
+    statMinRow,
+    ...signatureRows,
+  ];
+
+  const ws = XLSX.utils.aoa_to_sheet(fullSheetData);
+  ws['!cols'] = [
+    { wch: 5 },
+    { wch: 14 },
+    { wch: 12 },
+    { wch: 28 },
+    ...subjectNames.map(() => ({ wch: 14 })),
+    { wch: 12 },
+    { wch: 12 },
+    { wch: 10 },
+    { wch: 8 },
+    { wch: 8 },
+    { wch: 8 },
+    { wch: 11 },
+    { wch: 40 },
+  ];
+
+  XLSX.utils.book_append_sheet(wb, ws, `Leger_${(classInfo.name || 'Kelas').replace(/\s+/g, '_')}`);
+  const cleanClassName = (classInfo.name || 'Kelas').replace(/[^a-zA-Z0-9]/g, '_');
+  XLSX.writeFile(wb, `Leger_Nilai_${cleanClassName}_STS_${school.tp.replace(/[^a-zA-Z0-9]/g, '_')}.xlsx`);
+}
+
+export function exportClassLegerToCsv(params: {
+  school: SchoolData;
+  classInfo: Partial<ClassItem>;
+  students: RankedStudentItem[];
+  allSubjects: Array<{ name: string; category: string }>;
+  grades: StudentGradesMap;
+}) {
+  const { school, classInfo, students, allSubjects, grades } = params;
+  const subjectNames = allSubjects.map((s) => s.name);
+  const subjectHeaders = allSubjects.map(
+    (s) => `"${getSubjectAbbreviation(s.name)}"`
+  );
+
+  const lines: string[] = [
+    `"LEGER NILAI HASIL BELAJAR SISWA - ${school.name}"`,
+    `"Kelas: ${classInfo.name || '-'}","Tingkat: ${classInfo.grade || '-'}","Konsentrasi: ${classInfo.major || '-'}","Wali Kelas: ${classInfo.waliKelasName || '-'}","TP: ${school.tp}"`,
+    '',
+    [
+      '"No"',
+      '"NISN"',
+      '"NIS"',
+      '"Nama Siswa"',
+      ...subjectHeaders,
+      '"Total Nilai"',
+      '"Rata-Rata"',
+      '"Peringkat"',
+      '"Sakit"',
+      '"Izin"',
+      '"Alpa"',
+      '"Catatan"',
+    ].join(','),
+  ];
+
+  students.forEach((st, idx) => {
+    const stGrades = grades[st.id] || {};
+    const subScores = subjectNames.map((sub) => {
+      const v = stGrades[sub];
+      return v !== undefined && v !== null && !isNaN(Number(v)) ? Number(v) : '';
+    });
+    lines.push(
+      [
+        idx + 1,
+        `"${st.nisn}"`,
+        `"${st.nis}"`,
+        `"${st.name.replace(/"/g, '""')}"`,
+        ...subScores,
+        st.totalScore,
+        st.avgScore,
+        st.rank,
+        st.attendance?.sakit || 0,
+        st.attendance?.izin || 0,
+        st.attendance?.alpa || 0,
+        `"${(st.note || '').replace(/"/g, '""')}"`,
+      ].join(',')
+    );
+  });
+
+  const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `Leger_Nilai_${(classInfo.name || 'Kelas').replace(/\s+/g, '_')}_STS.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+export function triggerPrintClassLeger(): void {
+  const styleEl = document.createElement('style');
+  styleEl.id = 'leger-landscape-print-style';
+  styleEl.innerHTML = `@page { size: A4 landscape !important; margin: 6mm !important; }`;
+  document.head.appendChild(styleEl);
+  document.body.classList.add('printing-leger');
+
+  const cleanup = () => {
+    document.body.classList.remove('printing-leger');
+    const existing = document.getElementById('leger-landscape-print-style');
+    if (existing) existing.remove();
+    window.removeEventListener('afterprint', cleanup);
+  };
+
+  window.addEventListener('afterprint', cleanup);
+  setTimeout(() => {
+    window.print();
+    setTimeout(cleanup, 2000);
+  }, 120);
 }
 
 // ============================================================================
